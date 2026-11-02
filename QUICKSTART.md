@@ -9,7 +9,7 @@
 网关只有一套**客户端访问密钥 `account_keys`**（在 `config.json` 里，已取消主密钥 / 区域密钥 / 供应商密钥），它打到 `auths/auth.json` 凭证池：
 
 ```
-[你的 dsh / curl]  ──Bearer: account_key──▶  [workbuddy2api 网关]
+[你的 dsh / curl]  ──Bearer: account_key──▶  [reverse-proxy 网关]
                                                      │
                             auths/auth.json 里的各供应商 token
                                                      │
@@ -48,25 +48,47 @@ docker compose up -d --build
 
 ```sh
 # CodeBuddy 走自动 OAuth（打印 URL → 浏览器登录 → 回车轮询拿 token）
-docker exec -it workbuddy2api /app/login codebuddy cn 我的主号      # 国内版
-docker exec -it workbuddy2api /app/login codebuddy intl 我的国际版  # 国际版 → 键名 codebuddyai_1
+docker exec -it reverse-proxy /app/login codebuddy cn 我的主号      # 国内版
+docker exec -it reverse-proxy /app/login codebuddy intl 我的国际版  # 国际版 → 键名 codebuddyai_1
 
 # 这三家是「粘贴凭证」型：先看它打印的取凭证指引，再从 stdin 粘入 JSON
-docker exec -it workbuddy2api /app/login trae 我的trae
-docker exec -it workbuddy2api /app/login qoder 我的qoder
-docker exec -it workbuddy2api /app/login doubao 我的豆包
+docker exec -it reverse-proxy /app/login trae 我的trae
+docker exec -it reverse-proxy /app/login qoder 我的qoder
+docker exec -it reverse-proxy /app/login doubao 我的豆包
 ```
+
+> ⚠️ 容器没起来（重启循环）时 `docker exec` 进不去，用一次性容器挂载同款卷来登录：
+> ```sh
+> docker run -it --rm --entrypoint /app/login.sh -v %cd%/auths:/app/auths -v %cd%/data:/app/data -v %cd%/config.json:/app/config.json reverse-proxy-wb2api
+> ```
 
 > **在 Windows 上不要用 `-it` 手粘**：`-it` 的伪终端里 Ctrl+D 传不进容器，程序会一直等 EOF 卡住。
 > 把凭证存成文件 + `-i` 重定向即可（文件读完自动 EOF）：
 > ```sh
-> docker exec -i workbuddy2api /app/login doubao 我的豆包 < cred.json
+> docker exec -i reverse-proxy /app/login doubao 我的豆包 < cred.json
 > ```
 > 登录成功后会**自动往 `config.json` 的 `account_keys` 写一把随机密钥**（已存在则沿用不覆盖）。
 
+### 各家最少凭证 JSON（存成 cred.json 后按上面重定向粘入）
+
+```jsonc
+// Trae —— 必填 accessToken + uid
+{ "accessToken": "<Cloud-IDE-JWT 原文>", "uid": "<X-Uid>" }
+
+// Qoder —— 最简：只给 PAT（自动兑换 jobToken + 生成机器指纹 + 兜底 uid）
+{ "pat": "pt-…" }
+// 或已有设备流令牌（uid 也可省）：注意 jt- 不能对话，对话需真 dt-（见 PROVIDERS.md §6）
+{ "accessToken": "dt-…", "refreshToken": "drt-…" }
+
+// 豆包 —— 最少只给 sessionid（F12 整段 Cookie 直接粘也可以）
+{ "sessionid": "…" }
+```
+
+> CodeBuddy 不用粘 JSON：跑命令后按提示浏览器登录即可。
+
 ## 重启加载账号
 ```sh
-docker restart workbuddy2api
+docker restart reverse-proxy        # 容器名见 docker-compose.yml 的 container_name
 ```
 
 ## 验证
@@ -88,7 +110,7 @@ curl -s http://127.0.0.1:7863/status -H "Authorization: Bearer <该账号专属�
 
 | provider | 用途 | auth.json 条目 | 获取脚本 |
 | --- | --- | --- | --- |
-| `trae` | Trae 国内版（chat_v3） | `trae_<n>` | `login trae cn` |
+| `trae` | Trae 国内版（chat_v3） | `trae_<n>` | `login trae`（无区域参数） |
 | `qoder` | Qoder 国内版（COSY） | `qoder_<n>` | `scripts/qoder_bootstrap.py` |
 | `doubao` | 豆包网页版（**仅对话，无工具调用**） | `doubao_<n>` | `scripts/doubao_session.py` |
 

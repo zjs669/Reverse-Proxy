@@ -90,6 +90,9 @@
   }
 }
 ```
+
+**最少 JSON**：`{"accessToken":"<Cloud-IDE-JWT 原文>","uid":"<X-Uid>"}` —— 必填就这两个；`refreshToken`/`extra` 可省（`expiresAt` 由向导从 JWT `exp` 自动解析、`extra.sourceId` 从 JWT `data.source_id` 自动解析）。
+
 - **请求头（缺一不可）**：
   - `Authorization: Cloud-IDE-JWT <jwt>` ← `accessToken` 原样填入（Bearer 风格的 `Cloud-IDE-JWT ` 前缀由网关加）
   - `X-Cloudide-Token: <jwt>` ← 与 `accessToken` 同源
@@ -118,6 +121,13 @@
   }
 }
 ```
+
+**最少 JSON**（二选一）：
+- PAT 路线（最简，login 自动兑换 jobToken、生成机器指纹、兜底 uid，PAT 自动进 `extra.pat` 供续期）：`{"pat":"pt-…"}`
+- 设备流路线（uid 也可省，机器指纹自动生成）：`{"accessToken":"dt-…","refreshToken":"drt-…"}`
+
+> ⚠️ PAT 兑换出的 `jt-` 只对 OpenAPI 有效，**对话网关实测会拒（`105 Login expired`）**——见 §6。对话稳定可用的仍是真设备流 `dt-`。
+
 - COSY 请求签名需要持久机器指纹（`machineID`/`machineToken`/`machineType`），缺一不可（`NewCosySession` 缺任一直接报错）。
 - 上游：Gateway `gateway.qoder.com.cn`（对话/模型）、OpenAPI `openapi.qoder.com.cn`（drt 刷新）。
 - ⚠️ **PAT(pt-) → jobToken(jt-) 不能用于对话网关**：`jt-` 只对 `openapi.qoder.com.cn`（OpenAPI）有效；**对话网关 `gateway.qoder.com.cn` 只认设备令牌 `dt-`，喂 `jt-` 会被拒并返回 `105 Login expired`**。因此 `accessToken` 必须是设备流拿到的真 `dt-`，不是 PAT 兑换的 `jt-`。
@@ -142,6 +152,8 @@
   }
 }
 ```
+
+**最少 JSON**：`{"sessionid":"…"}` —— 只要有 `sessionid` 即可（自动映射为 `accessToken`，uid 缺省 `doubao-work-1`）；`ttwid`/`passport_csrf_token` 可选增强（降低风控概率）。F12 复制的整段 Cookie 直接粘也能被自动归一。
 
 **协议要点**（`internal/upstream/doubao.go`）：
 - 对话：`POST https://www.doubao.com/chat/completion`，Query 固定携带 `aid=582478` / `device_id` / `web_id` / `version_code=20800` 等；**必须带 `Agw-Js-Conv: str` 与 `Referer: https://www.doubao.com/chat`**。
@@ -182,15 +194,15 @@ cd workbuddy2api
 docker compose up -d --build
 ```
 
-- `auths/auth.json`、`data/`、`config.json` 都是挂载卷：新增/修改凭证后 `docker restart workbuddy2api` 即重新加载（`LoadFile` 只在启动时读；token 刷新由网关自动写回 `auth.json`，无需重启）。
+- `auths/auth.json`、`data/`、`config.json` 都是挂载卷：新增/修改凭证后 `docker restart reverse-proxy` 即重新加载（`LoadFile` 只在启动时读；token 刷新由网关自动写回 `auth.json`，无需重启）。
 - `scripts/` 已整目录打进镜像（容器内有 python3），也可以在容器里直接跑凭证脚本：
 
 ```sh
 # 宿主机
 python3 scripts/doubao_session.py --cookie "sessionid=...; ttwid=..." --uid doubao-1
 # 或容器内（auths 是同一个挂载卷，落到宿主机 ./auths）
-docker exec -it workbuddy2api python3 /app/scripts/doubao_session.py --help
-docker exec -it workbuddy2api python3 /app/scripts/qoder_bootstrap.py --print-fp
+docker exec -it reverse-proxy python3 /app/scripts/doubao_session.py --help
+docker exec -it reverse-proxy python3 /app/scripts/qoder_bootstrap.py --print-fp
 ```
 
 ### 验证某供应商可用
@@ -261,7 +273,7 @@ curl /v1/models (codebuddy_1 账号密钥) → 动态模型（上游实时拉取
 curl /v1/chat (doubao 账号密钥)     → 503 no_healthy_account（尚未放入 doubao 凭证，预期）
 ```
 
-> 未验证部分：豆包真实对话链路（需要浏览器 `sessionid`）、trae/qoder 真实对话链路（需要各自凭证）。凭证落盘后 `docker restart workbuddy2api` 即可复测。
+> 未验证部分：豆包真实对话链路（需要浏览器 `sessionid`）、trae/qoder 真实对话链路（需要各自凭证）。凭证落盘后 `docker restart reverse-proxy` 即可复测。
 
 ---
 
@@ -290,11 +302,11 @@ curl /v1/chat (doubao 账号密钥)     → 503 no_healthy_account（尚未放�
 5. **密钥**：跑 `python gen_account_keys.py` 为新账号补嵌套 `account_keys`，刷新 `账号令牌清单.md`。
 6. **文档**：在本文件 §2 加凭证小节。
 
-### 8.3 获取什么（凭证来源速查）
-- **codebuddy**：`./login codebuddy cn|intl <昵称>` 走 OAuth 设备流。
-- **trae**：`./login trae cn <昵称>` 粘贴 `Cloud-IDE-JWT`（自动解析 `exp`/`source_id`）。
-- **qoder**：设备流 `dt-`/`drt-` + COSY 机器指纹三件套（`scripts/qoder_bootstrap.py`）。
-- **doubao**：浏览器 `sessionid` Cookie（`scripts/doubao_session.py`）。
+### 8.3 获取什么（凭证来源速查，含最少 JSON）
+- **codebuddy**：`./login codebuddy cn|intl <昵称>` 走 OAuth 设备流（无需粘贴 JSON）。
+- **trae**：`./login trae <昵称>` 粘贴 `{"accessToken":"<Cloud-IDE-JWT>","uid":"<X-Uid>"}`（自动解析 `exp`/`source_id`）。
+- **qoder**：`./login qoder <昵称>` 粘贴 `{"pat":"pt-…"}`（自动兑换+生成指纹+兜底 uid）；或设备流 `{"accessToken":"dt-…","refreshToken":"drt-…"}`（`scripts/qoder_bootstrap.py`）。
+- **doubao**：`./login doubao <昵称>` 粘贴 `{"sessionid":"…"}`（`scripts/doubao_session.py`）。
 
 ### 8.4 踩坑点（本仓库真实教训，务必避开）
 1. **值接收者 + `modelMap` = 映射永久失效**：provider 以值存进 `providers` map，若 `FetchModels` 用值接收者，`p.modelMap=mm` 写在副本上被丢弃 → `resolveModel` 永远拿到空 map → 把客户端模型名**原样当上游 key 发出**（例：`qwen3.8-flash` 真实 key 是 `qfmodel`，发错名上游会走默认模型）。→ **有共享状态就指针接收者 + 存指针**。

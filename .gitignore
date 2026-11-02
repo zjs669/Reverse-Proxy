@@ -24,3 +24,6 @@ config.json.testbak
 .idea/
 __pycache__/
 *.pyc
+
+# ---- 本地截图 ----
+.screenshots/

@@ -2,10 +2,10 @@
   "listen": ":7863",
   "account_keys": {
     "qoder_1": {
-      "<uid>": "<secret>"
+      "<uid>": "<qoder-secret>"
     },
     "codebuddy_1": {
-      "<uid>": "<secret>"
+      "<uid>": "<codebuddy-secret>"
     }
   },
   "auth_file": "./auths/auth.json",
@@ -19,7 +19,6 @@
     "disabled": true
   },
   "models": {
-    "_comment": "排除清单（非白名单）：列出的模型 ID 不会出现在 /v1/models，但客户端显式请求仍会透传上游。主数据源是上游动态拉取，新增模型会自动出现，无需在此维护全量清单。段为空/缺省 = 不排除任何模型。",
     "codebuddy": [],
     "intl": [],
     "trae": [],

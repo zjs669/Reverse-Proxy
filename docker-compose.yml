@@ -1,7 +1,7 @@
 services:
   wb2api:
     build: .
-    container_name: workbuddy2api
+    container_name: reverse-proxy
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai

@@ -449,6 +449,11 @@ func loginQoder(nickname, authFile, key string) {
 				uid = u
 			}
 		}
+		// PAT 收进 extra：网关临期用它自动换新 jt-（对齐 qoder.go RefreshToken 路线 1）
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		extra["pat"] = pat
 		_ = exchangeErr
 	}
 
@@ -456,15 +461,19 @@ func loginQoder(nickname, authFile, key string) {
 		fatal("凭证缺少 accessToken（或 pat 兑换失败）")
 	}
 	if uid == "" {
-		fatal("凭证缺少 uid（PAT 路线也未能取到，请显式填 uid）")
+		// userinfo 拿不到 uid（接口拒绝/字段形态不符）时兜底随机 uid：
+		// uid 仅作账号标识与展示，上游鉴权走 accessToken（对齐 qoder_bootstrap.py 的 uuid4 兜底）。
+		uid = strings.ReplaceAll(genUUID(), "-", "")[:16]
+		fmt.Println("→ userinfo 未取到 uid，使用随机 uid 兜底:", uid)
 	}
-	// 机器指纹缺失则自动生成
+	// 机器指纹缺失则自动生成（PAT 路线无需用户手填，向导提示与实际行为一致）
 	if extra == nil {
 		extra = map[string]any{}
 	}
+	fp := genMachineFingerprint()
 	for _, f := range []string{"machineID", "machineToken", "machineType"} {
 		if strings.TrimSpace(fmt.Sprint(extra[f])) == "" {
-			fatal("凭证 extra 缺少 %s（PAT 路线也需提供机器指纹，或用 qoder_bootstrap.py 生成）", f)
+			extra[f] = fp[f]
 		}
 	}
 
@@ -674,10 +683,46 @@ func qoderUserinfo(jt string) (string, error) {
 		return "", fmt.Errorf("http %d", resp.StatusCode)
 	}
 	var out struct {
-		UID string `json:"uid"`
+		UID  string `json:"uid"`
+		Data struct {
+			UserID string `json:"user_id"`
+			UserId string `json:"userId"`
+			UID    string `json:"uid"`
+		} `json:"data"`
 	}
 	_ = json.Unmarshal(rb, &out)
-	return out.UID, nil
+	// userinfo 返回形态不固定：可能是顶层 uid，也可能是嵌套 data.user_id/userId/uid
+	// （与 qoder_bootstrap.py fetch_userinfo 的解析链对齐）。
+	for _, u := range []string{out.UID, out.Data.UserID, out.Data.UserId, out.Data.UID} {
+		if strings.TrimSpace(u) != "" {
+			return strings.TrimSpace(u), nil
+		}
+	}
+	return "", nil
+}
+
+// genMachineFingerprint 生成 COSY 持久机器指纹（与 qoder_bootstrap.py
+// gen_machine_fingerprint / qoderwork2api EnsureMachineFingerprint 对齐）。
+func genMachineFingerprint() map[string]string {
+	seed := (genUUID() + genUUID())
+	seed = strings.ReplaceAll(seed, "-", "")
+	if len(seed) > 50 {
+		seed = seed[:50]
+	}
+	return map[string]string{
+		"machineID":    genUUID(),
+		"machineToken": base64.RawURLEncoding.EncodeToString([]byte(seed)),
+		"machineType":  strings.ReplaceAll(genUUID(), "-", "")[:18],
+	}
+}
+
+// genUUID 生成随机 UUIDv4（crypto/rand）。
+func genUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0F) | 0x40
+	b[8] = (b[8] & 0x3F) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // ─── CodeBuddy OAuth 公共件 ────────────────────────────────────────────────

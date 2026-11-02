@@ -65,7 +65,7 @@ mkdir -p auths data
 
 ```bash
 docker compose up -d --build
-docker logs workbuddy2api --tail 20
+docker logs reverse-proxy --tail 20
 ```
 
 看到这行即成功：
@@ -78,11 +78,11 @@ workbuddy2api listening on :7863 (api_key=false, account_keys=0, provider_keys=0
 
 ```bash
 # CodeBuddy：自动 OAuth（打印 URL → 浏览器登录 → 回车轮询拿 token）
-docker exec -it workbuddy2api /app/login codebuddy cn 我的主号
+docker exec -it reverse-proxy /app/login codebuddy cn 我的主号
 
 # Trae / Qoder / 豆包工作：按提示粘贴凭证 JSON（Windows 用文件重定向，见下）
-docker exec -i workbuddy2api /app/login trae 我的trae < trae.json
-docker exec -i workbuddy2api /app/login doubao 我的豆包 < doubao.json
+docker exec -i reverse-proxy /app/login trae 我的trae < trae.json
+docker exec -i reverse-proxy /app/login doubao 我的豆包 < doubao.json
 ```
 
 登录成功后 `auths/auth.json` 会多一条账号，并**自动往 `config.json` 的 `account_keys` 写一把随机密钥**（已存在则沿用不覆盖），控制台会把它打印出来：
@@ -96,7 +96,7 @@ docker exec -i workbuddy2api /app/login doubao 我的豆包 < doubao.json
 ### 4. 重启加载
 
 ```bash
-docker restart workbuddy2api    # 或用 compose up -d --force-recreate
+docker restart reverse-proxy    # 或用 compose up -d --force-recreate
 ```
 
 ### 5. 验证
@@ -196,7 +196,7 @@ curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <密钥>"
 容器内执行（推荐）：
 
 ```bash
-docker exec -i workbuddy2api /app/login doubao 我的豆包 < cred.json
+docker exec -i reverse-proxy /app/login doubao 我的豆包 < cred.json
 ```
 
 ### 各家凭证怎么取
@@ -208,17 +208,19 @@ docker exec -i workbuddy2api /app/login doubao 我的豆包 < cred.json
 | Qoder | `dt-…` / `drt-…` token | qoder 登录后 F12 抓请求头，或用 `scripts/qoder_bootstrap.py` 引导 | 30 天 |
 | 豆包工作 | 账号 Cookie（`sessionid` / `ttwid` / `passport_csrf_token`） | 豆包工作客户端登录 → F12 → Network → 任一 chat 请求 → 请求头 `Cookie:` 整段 | ~30 天 |
 
-凭证文件格式（`cred.json`）：
+凭证文件格式（`cred.json`）—— **每家最少只需这些字段**（省略的字段自动补全：uid 兜底随机/缺省值、机器指纹自动生成、expiresAt 自动解析）：
 
 ```jsonc
-// Trae
-{ "accessToken": "<Cloud-IDE-JWT>", "uid": "<你的uid>" }
+// Trae —— 必填 accessToken + uid
+{ "accessToken": "<Cloud-IDE-JWT 原文>", "uid": "<X-Uid>" }
 
-// Qoder
-{ "accessToken": "dt-…", "refreshToken": "drt-…", "uid": "<uid>" }
+// Qoder —— 最简：只给 PAT（login 自动兑换 jobToken + 生成机器指纹 + 兜底 uid）
+{ "pat": "pt-…" }
+// 或已有设备流令牌（uid 也可省）：
+{ "accessToken": "dt-…", "refreshToken": "drt-…" }
 
-// 豆包：可以直接粘 F12 复制的整段 Cookie（推荐）
-{ "sessionid": "…", "ttwid": "1%7C…", "passport_csrf_token": "…" }
+// 豆包 —— 最少只给 sessionid（ttwid / passport_csrf_token 可选增强）
+{ "sessionid": "…" }
 ```
 
 ### Windows 上粘不进去 / 卡住？
@@ -227,9 +229,9 @@ docker exec -i workbuddy2api /app/login doubao 我的豆包 < cred.json
 
 ```bash
 # 方案 A（推荐）：文件重定向，`-i` 不要 `-t`，读完自动 EOF
-docker exec -i workbuddy2api /app/login doubao 我的豆包 < cred.json
+docker exec -i reverse-proxy /app/login doubao 我的豆包 < cred.json
 # cmd 里也可以用管道
-type cred.json | docker exec -i workbuddy2api /app/login doubao 我的豆包
+type cred.json | docker exec -i reverse-proxy /app/login doubao 我的豆包
 ```
 
 ```bash
@@ -425,7 +427,7 @@ WARN: [auth] trae/我的trae 凭证已于 2026-11-01 20:38 过期 … 需人工�
 上游按账号默认档位走，模型名目前只是标签（已知限制）。但**推理强度**（`reasoning_effort`）是真生效的。
 
 **Q：改了 `config.json` 要重新 build 吗？**
-不用。它是挂载文件，`docker restart workbuddy2api` 即可；只有改 Go 代码才 `docker compose up -d --build`。
+不用。它是挂载文件，`docker restart reverse-proxy` 即可；只有改 Go 代码才 `docker compose up -d --build`。
 
 **Q：Windows 下 `./login` 卡住不动？**
 见 [Windows 上粘不进去](#windows-上粘不进去--卡住)。
