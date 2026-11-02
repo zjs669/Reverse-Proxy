@@ -1,0 +1,26 @@
+# ---- 凭证 / 运行时状态：含网关密钥与上游 token，绝不入库 ----
+auths/
+data/
+config.json
+config.json.bak.*
+config.json.testbak
+账号令牌清单.md
+# 内部交接文档：含真实 uid、密钥与运维细节，不随开源仓库发布
+交接文档.md
+
+# ---- AI 会话/记忆目录（可能含账号标识）----
+.workbuddy/
+
+# ---- 本地构建产物 ----
+/login
+/credit
+/signin_bin
+*.exe
+*.log
+*.bak
+*.bak-*
+
+# ---- IDE / Python ----
+.idea/
+__pycache__/
+*.pyc

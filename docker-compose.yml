@@ -1,0 +1,26 @@
+services:
+  wb2api:
+    build: .
+    container_name: workbuddy2api
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "7863:7863"
+    volumes:
+      # auths 下全部供应商凭证合并进单个 auth.json（顶层 map：键为账号标签，值为凭证）。
+      # 新增/修改账号后只需 `docker restart workbuddy2api` 重新加载（LoadFile 启动时读取）。
+      - ./auths:/app/auths
+      - ./data:/app/data
+      # config.json 可写：login 登录后会自动把 API 密钥写入 account_keys。
+      - ./config.json:/app/config.json
+    # 国际版 codebuddy.ai：宿主机代理 fake-ip DNS 会把域名解析成 198.18.x.x 假 IP，
+    # 容器直连假 IP 握手即断（TLS EOF）。这里固定真实 IP（腾讯云国际边缘，DoH 解析），
+    # 让容器绕过被劫持的 DNS 直连。IP 失效时用 DoH 重新解析替换：
+    #   curl -s "https://dns.alidns.com/resolve?name=www.codebuddy.ai&type=A"
+    #
+    # 供应商域名（www.doubao.com / trae-api-cn.mchost.guru / gateway.qoder.com.cn）均为国内解析，
+    # 正常直连即可。若容器内 `getent hosts <域名>` 也返回 198.18.x.x（同一 fake-ip 劫持），
+    # 按上面同样的方式追加一行固定真实 IP。
+    extra_hosts:
+      - "www.codebuddy.ai:43.160.158.125"
