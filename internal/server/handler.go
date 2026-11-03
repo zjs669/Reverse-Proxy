@@ -370,6 +370,14 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
 // uid 非空 = 账号级密钥：只从该账号拉模型；否则按 region+provider 从池中任一健康账号拉。
 func (h *Handler) modelList(region, provider, uid string) []map[string]any {
+	// 实际供应商：优先用密钥绑定的 provider；账号级密钥则取该账号自身的 provider。
+	// 图片能力标注依赖它（isVisionModel），不能只看入参 provider（可能为空）。
+	capProvider := provider
+	if capProvider == "" && uid != "" {
+		if acct := h.cfg.Pool.AccountByUID(uid); acct != nil {
+			capProvider = acct.ProviderOrDefault()
+		}
+	}
 	// 主数据源 = 上游动态拉取（权威、实时，带 1h 缓存）。上游新增模型会自动出现，
 	// 不再依赖写死的清单。config 的 models.<key> 仅作为「排除清单」藏掉少数报错模型。
 	if infos := h.fetchDynamicModels(region, provider, uid); len(infos) > 0 {
@@ -386,12 +394,13 @@ func (h *Handler) modelList(region, provider, uid string) []map[string]any {
 			if mi.ContextWindow == 0 {
 				entry["context_length"] = 131072 // 兜底
 			}
-			// 视觉能力标注：让客户端在选到视觉模型时允许附图、不再误报
-			// “当前模型不支持图片”。仅作启发式标注，上游是否真能读图由上游决定。
+			// 图片能力标注：客户端（DSH 等）据此决定能否发图——
+			// modalities 不含 "image" 时，DSH 会把截图替换成 "[image omitted ...]"
+			// 或直接拒绝发送。判定依据是「供应商是否支持图片」而非模型名（见 isVisionModel）。
 			// 同时写两个字段以兼容不同客户端：
-			//   - OpenAI 官方标准用 `modalities: ["text","image"]`（WorkBuddy/CodeBuddy 等认这个）；
+			//   - OpenAI 官方标准用 `modalities: ["text","image"]`；
 			//   - 部分客户端认 `capabilities: ["vision"]`，一并保留。
-			if isVisionModel(id) {
+			if isVisionModel(capProvider, id) {
 				entry["capabilities"] = []string{"vision"}
 				entry["modalities"] = []string{"text", "image"}
 			} else {
@@ -447,17 +456,78 @@ func (h *Handler) modelList(region, provider, uid string) []map[string]any {
 	return fallback
 }
 
-// isVisionModel 根据模型 ID 启发式判断是否具备视觉（多模态读图）能力。
-// 用于 /v1/models 标注 capabilities，让客户端在选到视觉模型时允许附图、不再误报
-// “当前模型不支持图片”。仅启发式标注：上游是否真能读图仍由上游决定。
-func isVisionModel(id string) bool {
+// isVisionModel 判断模型是否应标注「支持图片输入」。
+//
+// 为什么不按模型名白名单：实测（2026-11-03）CodeBuddy 上游**所有**模型都接受
+// OpenAI 的 image_url content 数组——glm-5.3 / hy3 / auto 这些看似「纯文本」的
+// 模型同样能正确识别图片。按名字猜会把绝大多数能读图的模型标成 text-only。
+//
+// 这个标注直接影响客户端行为：DSH 等客户端读 /v1/models 的 modalities，
+// 若不含 "image" 就把截图替换成 "[image omitted ...]" 或直接拒绝发送。
+// 标错 = 用户根本发不出图。
+//
+// 故判定依据换成「供应商是否支持图片」：
+//   - codebuddy / trae：透传 messages，上游接受 image_url → 支持
+//   - deepseek：网关内部转「上传文件 + ref_file_ids」→ 支持
+//   - doubao：自己拼 messages，目前丢弃图片 → 不支持
+//   - qoder：COSY 协议不走 OpenAI content 结构，上游报错 → 不支持
+func isVisionModel(provider, id string) bool {
+	if imageCapableProvider(provider) {
+		return true
+	}
+	// 非图片供应商仍保留按名字的启发式（便于将来接入新的多模态家）
 	lower := strings.ToLower(id)
-	// 注意：不能用笼统的 "deepseek"，因为 DeepSeek-V4-Pro 系列实测不支持看图；
-	// 仅 V4.1 系（DeepSeek-V4.1-Flash 等）带视觉，故精确匹配子串 "deepseek-v4.1"。
-	for _, kw := range []string{"seed-2.1", "vision", "glm-5v", "gemini", "gpt-4o", "claude", "hunyuan-vision", "deepseek-v4.1"} {
+	for _, kw := range []string{"vision", "gpt-4o", "gemini", "claude"} {
 		if strings.Contains(lower, kw) {
 			return true
 		}
+	}
+	return false
+}
+
+// requestHasImage 判断请求体里是否含图片内容块。
+//
+// 兼容两种客户端写法：
+//   {"type":"image_url","image_url":{...}}   OpenAI 标准
+//   {"type":"image","source":{...}}          Anthropic 风格
+// 只看最后一条 user 消息即可（历史里的旧图不需要重复上传）。
+func requestHasImage(body []byte) bool {
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return false
+	}
+	msgs, _ := obj["messages"].([]any)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m, ok := msgs[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := m["role"].(string); role != "user" {
+			continue
+		}
+		parts, ok := m["content"].([]any)
+		if !ok {
+			return false
+		}
+		for _, p := range parts {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := pm["type"].(string); t == "image_url" || t == "image" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// imageCapableProvider 该供应商是否支持图片输入。
+func imageCapableProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codebuddy", "", "trae", "deepseek":
+		return true
 	}
 	return false
 }
@@ -671,6 +741,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if region == "intl" {
 		body = prompt.EnsureSystem(body, prompt.Degraded)
+	}
+
+	// 本请求实际会用的供应商（账号级密钥取该号自身 provider，否则用供应商级密钥的值）。
+	// 仅用于「图片能力」判定；真正选号仍走下面的轮转逻辑。
+	fallbackProvider := provider
+	if fallbackProvider == "" {
+		if pinnedUID != "" {
+			if acct := h.cfg.Pool.AccountByUID(pinnedUID); acct != nil {
+				fallbackProvider = acct.ProviderOrDefault()
+			}
+		} else {
+			fallbackProvider = "codebuddy" // 未绑定时按默认回落目标判断
+		}
+	}
+
+	// 图片能力守卫：请求带图但供应商不支持时立即报错。
+	//
+	// 为什么不能让它自然失败：豆包 / qoder 的协议里没有图片位置，
+	// 图片会被静默丢弃，模型回一句「没看到图片」——用户完全无从判断是
+	// 「模型没看懂」还是「根本没传过去」。这里提前拦下并说清原因。
+	if requestHasImage(body) && !imageCapableProvider(fallbackProvider) {
+		writeOpenAIError(w, http.StatusBadRequest, "image_not_supported",
+			fmt.Sprintf("当前供应商 %s 不支持图片输入：请换用 codebuddy / trae / deepseek 的密钥，或去掉消息里的 image_url", fallbackProvider))
+		st.status = http.StatusBadRequest
+		return
 	}
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
