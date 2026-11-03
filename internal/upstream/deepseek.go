@@ -523,10 +523,18 @@ func (p *deepseekProvider) dsFetchCurrentMessageID(c *Client, a *auth.Auth, sess
 	return *payload.ChatSession.CurrentMessageID, nil
 }
 
-// dsPowHeader 申请并求解一次 PoW，返回 x-ds-pow-response 头值（一次性，不可复用）。
+// dsPowHeader 申请并求解一次 completion 用的 PoW（一次性，不可复用）。
 func (p *deepseekProvider) dsPowHeader(c *Client, a *auth.Auth) (string, error) {
+	return p.dsPowHeaderFor(c, a, deepseekCompletion)
+}
+
+// dsPowHeaderFor 按指定 target_path 申请并求解 PoW。
+//
+// 上传文件与对话用的是**两个不同的 PoW**：target_path 必须与目标接口一致
+// （/api/v0/chat/completion 或 /api/v0/file/upload_file），否则上游返回 40301。
+func (p *deepseekProvider) dsPowHeaderFor(c *Client, a *auth.Auth, targetPath string) (string, error) {
 	data, err := p.dsDoJSON(c, a, http.MethodPost, deepseekPowChallenge,
-		map[string]string{"target_path": deepseekCompletion})
+		map[string]string{"target_path": targetPath})
 	if err != nil {
 		return "", err
 	}
@@ -632,6 +640,35 @@ func (p *deepseekProvider) chatStreamOnce(c *Client, a *auth.Auth, reqBody map[s
 	thinking := deepseekThinking(reqBody)
 	search := deepseekSearch(reqBody)
 
+	// 图片：OpenAI 的 image_url(data URL) → 先上传拿 file id → ref_file_ids。
+	// 上传有独立的 PoW，且要轮询等审核通过，因此放在会话创建之前做：
+	// 上传失败时不必浪费一次 chat_session create。
+	atts, err := dsExtractImages(reqBody)
+	if err != nil {
+		return nil, http.StatusBadRequest, []byte(err.Error()), nil
+	}
+	var refFileIDs []string
+	if len(atts) > 0 {
+		refFileIDs, err = p.dsUploadAll(c, a, atts)
+		if err != nil {
+			log.Printf("WARN: [deepseek] upload uid=%s: %v", logUID(a.UID), err)
+			var ue *Error
+			if asError(err, &ue) {
+				return nil, ue.Status, []byte(ue.Msg), nil
+			}
+			return nil, http.StatusBadGateway, []byte(err.Error()), nil
+		}
+		// 上游有 SEARCH_CANNOT_WITH_FILE：带文件时必须关搜索，否则 biz_code=17。
+		if search {
+			log.Printf("[deepseek] uid=%s 带文件对话，自动关闭联网搜索（上游互斥）", logUID(a.UID))
+			search = false
+		}
+		// 视觉档位：带图时默认走 vision（账号未开放该档时上游会忽略，不影响）
+		if modelType == "default" {
+			modelType = "vision"
+		}
+	}
+
 	// 有会话键 → 只发本轮问题（历史由上游会话树带）；
 	// 无会话键 → 拼全部历史（上游无状态）。
 	var prompt string
@@ -672,7 +709,7 @@ func (p *deepseekProvider) chatStreamOnce(c *Client, a *auth.Auth, reqBody map[s
 		"parent_message_id": parentID, // nil → JSON null（首轮）
 		"model_type":        modelType,
 		"prompt":            prompt,
-		"ref_file_ids":      []any{},
+		"ref_file_ids":      refFileIDs,
 		"thinking_enabled":  thinking,
 		"search_enabled":    search,
 		"action":            nil,
