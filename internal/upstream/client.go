@@ -16,9 +16,9 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/dsconv"
-	"workbuddy2api/internal/logfmt"
+	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/dsconv"
+	"reverse-proxy/internal/logfmt"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。

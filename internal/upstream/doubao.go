@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 const (

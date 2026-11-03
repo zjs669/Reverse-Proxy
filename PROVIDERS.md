@@ -3,7 +3,7 @@
 > **来源**：本仓库是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的魔改分支（后者源自已删库的 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，MIT 协议）。本文件描述的是本仓库**新增的多供应商层**；CodeBuddy 原有链路的协议细节请参考上游文档。
 
 
-`workbuddy2api` 在原有 CodeBuddy 反代基础上，扩展了 **Provider 抽象层**，支持在**同一网关**里同时挂多个上游供应商：
+`Reverse-Proxy` 在原有 CodeBuddy 反代基础上，扩展了 **Provider 抽象层**，支持在**同一网关**里同时挂多个上游供应商：
 
 | provider | 上游 | 状态 | 说明 |
 | --- | --- | --- | --- |
@@ -213,14 +213,14 @@
   "accessToken": "<userToken>",     // 必需
   "expiresAt": 1796200000,
   "extra": {
-    "device_id": "<uuid>",          // 可选，缺省用内置常量
-    "ds_session_id": "<cookie>",    // 可选，带上更贴近浏览器指纹
-    "hwwafsesid": "<cookie>"        // 可选
+    "device_id": "<uuid>"           // 可选，缺省用进程内随机值
   }
 }
 ```
 
-**最少 JSON**：`{"accessToken":"<userToken>"}` —— 鉴权只需 `Authorization: Bearer <userToken>`；Cookie 与 `x-device-id` 实测均可缺省。
+**最少 JSON**：`{"accessToken":"<userToken>"}` —— 鉴权只需 `Authorization: Bearer <userToken>`；`x-device-id` 实测可缺省。
+
+> **不收集 Cookie**：浏览器 Cookie 实测非必需，`login` 只写 `accessToken`（可选 `device_id`），不保存任何会话凭证。
 
 **userToken 获取（授权登录需要什么）**：
 
@@ -240,7 +240,9 @@
 { "token": "mb5+...", "id": "<账号UUID>" }                       // 直接粘 users/current 响应片段
 ```
 
-**不需要**：Cookie（`ds_session_id` / `HWWAFSESID` 实测非必需）、密码、短信验证码、任何 API Key。
+**不需要**：Cookie、密码、短信验证码、任何 API Key。
+
+> 网关**不收集、不保存任何 Cookie**：DeepSeek 鉴权只认 `Authorization: Bearer <userToken>`，浏览器 Cookie 实测非必需，因此 `login` 只写入 `accessToken`（可选 `device_id`）。
 
 **有效期**：`userToken` 是不透明的 48 字节串，无内嵌过期时间，实测长期有效；失效表现为上游 `code=40003`，网关会禁用该号并提示重登。重新执行同一条 `./login deepseek <昵称>` 覆盖即可（键名固定 `deepseek_1`，不会无限增长）。
 
@@ -291,7 +293,7 @@
 ## 5. 构建与联调
 
 ```sh
-cd workbuddy2api
+cd Reverse-Proxy
 docker compose up -d --build
 ```
 

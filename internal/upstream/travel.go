@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 // growth 域路径（实测）。

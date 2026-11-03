@@ -9,7 +9,7 @@ import (
 	"io"
 	"net/http"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 // codebuddyProvider 包装既有 CodeBuddy 实现。

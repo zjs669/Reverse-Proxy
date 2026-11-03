@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 const (

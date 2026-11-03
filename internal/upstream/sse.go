@@ -213,7 +213,7 @@ func normalizeFrame(obj map[string]any) map[string]any {
 		out["object"] = "chat.completion.chunk"
 	}
 	if _, ok := out["id"]; !ok {
-		out["id"] = "chatcmpl-wb2api"
+		out["id"] = "chatcmpl-reverse-proxy"
 	}
 	if chs, ok := obj["choices"].([]any); ok {
 		nchs := make([]any, 0, len(chs))

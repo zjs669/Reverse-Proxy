@@ -12,7 +12,7 @@
 //   accessToken = userToken（浏览器 localStorage 的 userToken.value，或 Network 里
 //                 "Authorization: Bearer xxx" 后面那串）
 //   extra.device_id    可选，缺省用内置常量
-//   extra.ds_session_id / extra.hwwafsesid  可选 Cookie（实测非必需，带上更贴近浏览器）
+//   extra.device_id   可选，缺省用进程内随机值
 //
 // 协议要点（全部经实测确认，不是推测）：
 //   - 鉴权只需 Authorization: Bearer <userToken>；Cookie 与 x-device-id 均可缺省
@@ -49,9 +49,9 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/dsconv"
-	"workbuddy2api/internal/session"
+	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/dsconv"
+	"reverse-proxy/internal/session"
 )
 
 const (
@@ -267,9 +267,6 @@ func (p *deepseekProvider) deepseekHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("x-client-timezone-offset", "28800")
 	req.Header.Set("x-device-id", p.deviceID(a))
 	req.Header.Set("x-device-model", "")
-	if ck := p.cookie(a); ck != "" {
-		req.Header.Set("Cookie", ck)
-	}
 }
 
 // deepseekFallbackDevice 进程级兜底设备 ID。
@@ -286,18 +283,6 @@ func (p *deepseekProvider) deviceID(a *auth.Auth) string {
 		return v
 	}
 	return deepseekFallbackDevice
-}
-
-// cookie 组装可选 Cookie 头（实测非必需，带上更贴近浏览器指纹）。
-func (p *deepseekProvider) cookie(a *auth.Auth) string {
-	var parts []string
-	if v := strings.TrimSpace(a.ExtraVal("ds_session_id")); v != "" {
-		parts = append(parts, "ds_session_id="+v)
-	}
-	if v := strings.TrimSpace(a.ExtraVal("hwwafsesid")); v != "" {
-		parts = append(parts, "HWWAFSESID="+v)
-	}
-	return strings.Join(parts, "; ")
 }
 
 // dsEnvelope 上游统一信封。

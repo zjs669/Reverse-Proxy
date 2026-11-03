@@ -33,7 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 const (
@@ -181,7 +181,7 @@ func (p *qoderProvider) exchangePATLocked(c *Client, a *auth.Auth, pat string) e
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "workbuddy2api")
+	req.Header.Set("User-Agent", "reverse-proxy")
 	req.Header.Set("Cosy-Version", "1.0.1")
 	req.Header.Set("Cosy-ClientType", "5")
 	resp, err := c.QoderHTTP.Do(req)

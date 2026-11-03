@@ -10,7 +10,7 @@ import (
 	"io"
 	"net/http"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 // codebuddyName 默认 provider 名（回落目标）。

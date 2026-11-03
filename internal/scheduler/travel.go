@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/logfmt"
-	"workbuddy2api/internal/upstream"
+	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/logfmt"
+	"reverse-proxy/internal/upstream"
 )
 
 const (

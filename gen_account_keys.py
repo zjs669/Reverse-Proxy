@@ -140,7 +140,7 @@ for a in plan:
 
 # ---- 同步刷新速查文档 ----
 L = []
-L.append("# WorkBuddy2API 账号凭证速查（精简版）")
+L.append("# Reverse-Proxy 账号凭证速查（精简版）")
 L.append("")
 L.append("> ⚠️ 含网关密钥，勿外传 / 勿提交 git。")
 L.append("")

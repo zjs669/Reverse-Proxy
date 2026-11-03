@@ -57,13 +57,13 @@ var regions = map[string]region{
 		Name:      "CN",
 		Base:      "https://copilot.tencent.com",
 		Origin:    "https://www.codebuddy.cn",
-		StateFile: filepath.Join(os.TempDir(), "wb2api-login-cn.json"),
+		StateFile: filepath.Join(os.TempDir(), "reverse-proxy-login-cn.json"),
 	},
 	"intl": {
 		Name:      "Intl",
 		Base:      "https://www.codebuddy.ai",
 		Origin:    "https://www.codebuddy.ai",
-		StateFile: filepath.Join(os.TempDir(), "wb2api-login-intl.json"),
+		StateFile: filepath.Join(os.TempDir(), "reverse-proxy-login-intl.json"),
 	},
 }
 
@@ -89,7 +89,7 @@ func main() {
 		nickname = os.Args[2]
 	}
 
-	authFile := os.Getenv("WB2API_AUTH_FILE")
+	authFile := os.Getenv("REVERSE_PROXY_AUTH_FILE")
 	if authFile == "" {
 		authFile = defaultAuthFile
 	}
@@ -363,7 +363,7 @@ const deepseekInstructions = `DeepSeek 网页版（chat.deepseek.com）凭证获
        { "accessToken":"<userToken>" }
     B) 带设备指纹 / Cookie（更贴近浏览器，可选）：
        { "accessToken":"<userToken>", "uid":"deepseek-1",
-         "extra": { "device_id":"<uuid>", "ds_session_id":"<cookie>" } }
+         "extra": { "device_id":"<uuid>" } }
 
 命令示例：  login deepseek 我的DeepSeek`
 
@@ -637,27 +637,19 @@ func adaptDeepseekCredential(input map[string]any) map[string]any {
 			out["uid"] = "deepseek-1"
 		}
 	}
-	// extra 里只留真正会被出站请求用到的字段（device_id / ds_session_id / hwwafsesid）。
+	// extra 只保留 device_id。DeepSeek 鉴权只认 Bearer userToken，
+	// Cookie 实测非必需——不收集、不保存，避免把浏览器会话凭证落到磁盘。
 	extra := map[string]any{}
 	if e, ok := out["extra"].(map[string]any); ok {
-		for k, v := range e {
-			extra[k] = v
+		if v, _ := e["device_id"].(string); strings.TrimSpace(v) != "" {
+			extra["device_id"] = strings.TrimSpace(v)
 		}
 	}
-	promote := func(src, dst string) {
-		v, _ := out[src].(string)
-		v = strings.TrimSpace(v)
-		if v == "" {
-			return
-		}
-		if _, exists := extra[dst]; !exists {
-			extra[dst] = v
+	if v, _ := out["device_id"].(string); strings.TrimSpace(v) != "" {
+		if _, exists := extra["device_id"]; !exists {
+			extra["device_id"] = strings.TrimSpace(v)
 		}
 	}
-	promote("device_id", "device_id")
-	promote("ds_session_id", "ds_session_id")
-	promote("hwwafsesid", "hwwafsesid")
-	promote("HWWAFSESID", "hwwafsesid")
 	if len(extra) > 0 {
 		out["extra"] = extra
 	}
@@ -722,7 +714,7 @@ func qoderExchangePAT(pat string) (token, refresh string, expiresAt int64, err e
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "workbuddy2api")
+	req.Header.Set("User-Agent", "reverse-proxy")
 	req.Header.Set("Cosy-Version", "1.0.1")
 	req.Header.Set("Cosy-ClientType", "5")
 	resp, e := http.DefaultClient.Do(req)
@@ -930,14 +922,14 @@ func randomSecret() string {
 //   - 若该 label/uid 已存在非空密钥 → 沿用，不覆盖（续期不会把已有 key 冲掉）。
 //   - 否则自动生成一把随机密钥写入。
 //
-// 路径由 WB2API_CONFIG_FILE 指定，缺省 ./config.json。
+// 路径由 REVERSE_PROXY_CONFIG_FILE 指定，缺省 ./config.json。
 // 注意：容器里 config.json 必须可写挂载（docker-compose 去掉 :ro），否则写不进去。
 // 重写时保持顶层键原有顺序，仅替换/追加 account_keys，其余字段逐字节保留。
 func ensureAccountKey(label, uid string) {
 	if strings.TrimSpace(uid) == "" {
 		return
 	}
-	path := os.Getenv("WB2API_CONFIG_FILE")
+	path := os.Getenv("REVERSE_PROXY_CONFIG_FILE")
 	if path == "" {
 		path = "./config.json"
 	}
@@ -1059,7 +1051,7 @@ func ensureAccountKey(label, uid string) {
 	} else {
 		fmt.Printf("🔑 已自动生成 API 密钥并写入 account_keys（%s / %s）：\n   %s\n", label, uid, secret)
 	}
-	fmt.Println("   → 重启网关后生效：docker restart workbuddy2api")
+	fmt.Println("   → 重启网关后生效：docker restart reverse-proxy")
 }
 
 func restartGateway() {
@@ -1071,9 +1063,9 @@ func restartGateway() {
 	if err != nil {
 		return
 	}
-	if strings.Contains(string(out), "workbuddy2api") {
+	if strings.Contains(string(out), "reverse-proxy") {
 		fmt.Println("→ 重启网关加载新账号 ...")
-		_ = exec.Command("docker", "restart", "workbuddy2api").Run()
+		_ = exec.Command("docker", "restart", "reverse-proxy").Run()
 		time.Sleep(2 * time.Second)
 	}
 }

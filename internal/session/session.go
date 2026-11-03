@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/redisstore"
+	"reverse-proxy/internal/redisstore"
 )
 
 // entry 单条会话绑定。

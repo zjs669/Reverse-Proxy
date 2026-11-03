@@ -1,6 +1,8 @@
-# workbuddy2api
+# Reverse-Proxy
 
-把 **CodeBuddy / Trae / Qoder / 豆包工作** 的网页端账号，聚合成一个 **OpenAI 兼容** 的本地 API 网关。
+把 **CodeBuddy / Trae / Qoder / 豆包工作 / DeepSeek** 的网页端账号，聚合成一个 **OpenAI 兼容** 的本地 API 网关。
+
+> 名字里的 “Reverse-Proxy” 指的就是这件事：把各家**网页端**会话反向代理成标准 OpenAI 接口。
 
 一句话：客户端只改 `base_url` + 一把密钥，背后由网关轮换你的多个账号、翻译各家协议、自动续期 token。
 
@@ -73,6 +75,8 @@ Sliverkiss/workbuddy2api          （原始项目，上游已删库）
 - [账号池与路由](#账号池与路由)
 - [token 自动续期](#token-自动续期)
 - [常见问题](#常见问题)
+- [安全](#安全)
+- [License](#license)
 
 ---
 
@@ -116,7 +120,7 @@ docker logs reverse-proxy --tail 20
 看到这行即成功：
 
 ```
-workbuddy2api listening on :7863 (api_key=false, account_keys=0, provider_keys=0)
+Reverse-Proxy listening on :7863 (api_key=false, account_keys=0, provider_keys=0)
 ```
 
 ### 3. 登录上游账号
@@ -148,7 +152,7 @@ docker restart reverse-proxy    # 或用 compose up -d --force-recreate
 
 ```bash
 curl -s http://127.0.0.1:7863/healthz
-# {"healthy":2,"service":"workbuddy2api","total":3}
+# {"healthy":2,"service":"Reverse-Proxy","total":3}
 
 curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <密钥>"
 ```
@@ -347,7 +351,7 @@ auto:low | auto:medium | auto:xhigh | fast:low …
 
 ```bash
 curl -sN http://127.0.0.1:7863/v1/chat/completions \
-  -H "Authorization: Bearer $WB2API_KEY" \
+  -H "Authorization: Bearer $REVERSE_PROXY_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-v4.1-flash:high",

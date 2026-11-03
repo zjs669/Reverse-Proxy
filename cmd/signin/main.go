@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/upstream"
+	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/upstream"
 )
 
 type row struct {

@@ -25,9 +25,9 @@ import (
 	"log"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/logfmt"
-	"workbuddy2api/internal/upstream"
+	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/logfmt"
+	"reverse-proxy/internal/upstream"
 )
 
 const (
@@ -212,7 +212,7 @@ func (s *Scheduler) reportTokenFailure(a *auth.Auth, prov string, remaining time
 	// token 已过期：GetUserToken 只认未过期的 JWT，此时无法自助续期，只能重新登录。
 	if a.ExpiresAt > 0 && remaining <= 0 {
 		log.Printf("WARN: token-watch %s: %s token 已过期 %s，无法自助续期（GetUserToken 只接受未过期的 JWT）"+
-			" → 需重新登录：docker exec -i workbuddy2api /app/login %s <名> < cred.json",
+			" → 需重新登录：docker exec -i reverse-proxy /app/login %s <名> < cred.json",
 			logfmt.UID8(a.UID), prov, shortDur(-remaining), prov)
 		return
 	}
@@ -220,7 +220,7 @@ func (s *Scheduler) reportTokenFailure(a *auth.Auth, prov string, remaining time
 		// 未过期却判 session dead：多半是账号在别处被踢下线（同账号多端登录），
 		// 继续重试没有意义，直接给出重新登录提示。
 		log.Printf("WARN: token-watch %s: %s 续期被判 session dead（left=%s）：多端登录会把旧 session 顶掉，"+
-			"请重新登录：docker exec -i workbuddy2api /app/login %s <名> < cred.json",
+			"请重新登录：docker exec -i reverse-proxy /app/login %s <名> < cred.json",
 			logfmt.UID8(a.UID), prov, shortDur(remaining), prov)
 		return
 	}

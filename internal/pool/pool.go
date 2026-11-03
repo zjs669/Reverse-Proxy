@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 type Pool struct {

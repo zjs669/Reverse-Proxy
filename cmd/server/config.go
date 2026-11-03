@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy2api/internal/prompt"
+	"reverse-proxy/internal/prompt"
 )
 
 // Config 顶层配置。
@@ -241,7 +241,7 @@ func Default() *Config {
 	return c
 }
 
-// Load 从文件读，再用 WB2A_* env 覆盖。
+// Load 从文件读，再用 REVERSE_PROXY_* env 覆盖。
 func Load(path string) (*Config, error) {
 	c := Default()
 	if path != "" {
@@ -261,69 +261,69 @@ func Load(path string) (*Config, error) {
 }
 
 func applyEnv(c *Config) {
-	if v := os.Getenv("WB2A_LISTEN"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_LISTEN"); v != "" {
 		c.Listen = v
 	}
-	if v := os.Getenv("WB2A_API_KEY"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_API_KEY"); v != "" {
 		c.APIKey = v
 	}
-	if v := os.Getenv("WB2A_API_KEY_INTL"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_API_KEY_INTL"); v != "" {
 		if c.APIKeys == nil {
 			c.APIKeys = make(map[string]string)
 		}
 		c.APIKeys[v] = "intl"
 	}
-	if v := os.Getenv("WB2A_AUTH_FILE"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_AUTH_FILE"); v != "" {
 		c.AuthFile = v
-	} else if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
+	} else if v := os.Getenv("REVERSE_PROXY_AUTH_DIR"); v != "" {
 		c.AuthDir = v
 	}
-	if v := os.Getenv("WB2A_STATE_FILE"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_STATE_FILE"); v != "" {
 		c.StateFile = v
 	}
-	if v := os.Getenv("WB2A_MAX_BODY_MB"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_MAX_BODY_MB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Server.MaxBodyMB = n
 		}
 	}
-	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
 	}
-	if v := os.Getenv("WB2A_SOFT_RATE_MAX"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_SOFT_RATE_MAX"); v != "" {
 		c.Cooldown.SoftRateMax = v
 	}
-	if v := os.Getenv("WB2A_COOLDOWN_DISABLED"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_COOLDOWN_DISABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Cooldown.Disabled = b
 		}
 	}
-	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
 		}
 	}
-	if v := os.Getenv("WB2A_HEADER_TIMEOUT_SECONDS"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_HEADER_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.HeaderTimeoutSeconds = n
 		}
 	}
-	if v := os.Getenv("WB2A_IDLE_TIMEOUT_SECONDS"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_IDLE_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.IdleTimeoutSeconds = n
 		}
 	}
-	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_USER_AGENT"); v != "" {
 		c.Upstream.UserAgent = v
 	}
-	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
 	}
-	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_PROMPT_MODE"); v != "" {
 		c.Prompt.Mode = v
 	}
-	if v := os.Getenv("WB2A_PROMPT_FILE"); v != "" {
+	if v := os.Getenv("REVERSE_PROXY_PROMPT_FILE"); v != "" {
 		c.Prompt.File = v
 	}
 }

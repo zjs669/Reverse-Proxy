@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/logfmt"
+	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/logfmt"
 )
 
 func (p *Pool) Pick() *auth.Auth {

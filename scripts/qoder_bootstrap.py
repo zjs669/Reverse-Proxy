@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Qoder 凭证引导脚本（配合 workbuddy2api 网关的 provider="qoder"，国内版）。
+Qoder 凭证引导脚本（配合 Reverse-Proxy 网关的 provider="qoder"，国内版）。
 
 网关代码（internal/upstream/qoder.go）要求 qoder*.json 里：
   - provider     = "qoder"
@@ -45,7 +45,7 @@ USERINFO_URL = os.environ.get("QODER_USERINFO_URL", OPENAPI_BASE + "/api/v1/user
 COSY_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
-    "User-Agent": "workbuddy2api",
+    "User-Agent": "reverse-proxy",
     "Cosy-Version": "1.0.1",
     "Cosy-ClientType": "5",
 }
@@ -211,7 +211,7 @@ def main():
     print(f"  uid={uid}  nickname={nickname}")
     print(f"  expiresAt={doc['expiresAt']}  refreshToken={'有' if doc['refreshToken'] else '无'}  "
           f"extra.pat={'有（可自动续期）' if args.pat else '无'}")
-    print("下一步：python3 gen_account_keys.py && docker restart workbuddy2api")
+    print("下一步：python3 gen_account_keys.py && docker restart reverse-proxy")
 
 
 if __name__ == "__main__":

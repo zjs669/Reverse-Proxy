@@ -1,5 +1,5 @@
 services:
-  wb2api:
+  reverse-proxy:
     build: .
     container_name: reverse-proxy
     restart: unless-stopped
@@ -9,7 +9,7 @@ services:
       - "7863:7863"
     volumes:
       # auths 下全部供应商凭证合并进单个 auth.json（顶层 map：键为账号标签，值为凭证）。
-      # 新增/修改账号后只需 `docker restart workbuddy2api` 重新加载（LoadFile 启动时读取）。
+      # 新增/修改账号后只需 `docker restart reverse-proxy` 重新加载（LoadFile 启动时读取）。
       - ./auths:/app/auths
       - ./data:/app/data
       # config.json 可写：login 登录后会自动把 API 密钥写入 account_keys。

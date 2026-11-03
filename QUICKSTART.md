@@ -1,7 +1,7 @@
-# workbuddy2api 新设备精简部署
+# Reverse-Proxy 新设备精简部署
 
 ## 前提
-- 把 `workbuddy2api` 文件夹整体拷到新设备
+- 把 `Reverse-Proxy` 文件夹整体拷到新设备
 - 新设备装好 Docker（能直连 docker.io，无需配镜像源）
 - 一并带上 `auths/auth.json` 可免登录
 
@@ -33,7 +33,7 @@
 
 ## 构建并启动
 ```sh
-cd workbuddy2api
+cd Reverse-Proxy
 docker compose up -d --build
 ```
 
@@ -55,11 +55,12 @@ docker exec -it reverse-proxy /app/login codebuddy intl 我的国际版  # 国�
 docker exec -it reverse-proxy /app/login trae 我的trae
 docker exec -it reverse-proxy /app/login qoder 我的qoder
 docker exec -it reverse-proxy /app/login doubao 我的豆包
+docker exec -it reverse-proxy /app/login deepseek 我的DeepSeek
 ```
 
 > ⚠️ 容器没起来（重启循环）时 `docker exec` 进不去，用一次性容器挂载同款卷来登录：
 > ```sh
-> docker run -it --rm --entrypoint /app/login.sh -v %cd%/auths:/app/auths -v %cd%/data:/app/data -v %cd%/config.json:/app/config.json reverse-proxy-wb2api
+> docker run -it --rm --entrypoint /app/login -v %cd%/auths:/app/auths -v %cd%/data:/app/data -v %cd%/config.json:/app/config.json reverse-proxy-reverse-proxy
 > ```
 
 > **在 Windows 上不要用 `-it` 手粘**：`-it` 的伪终端里 Ctrl+D 传不进容器，程序会一直等 EOF 卡住。

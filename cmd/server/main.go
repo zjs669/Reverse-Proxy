@@ -1,4 +1,4 @@
-// main.go workbuddy2api 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
+// main.go Reverse-Proxy 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
 package main
 
 import (
@@ -12,15 +12,15 @@ import (
 	"syscall"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/dsconv"
-	"workbuddy2api/internal/logfmt"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/redisstore"
-	"workbuddy2api/internal/scheduler"
-	"workbuddy2api/internal/server"
-	"workbuddy2api/internal/session"
-	"workbuddy2api/internal/upstream"
+	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/dsconv"
+	"reverse-proxy/internal/logfmt"
+	"reverse-proxy/internal/pool"
+	"reverse-proxy/internal/redisstore"
+	"reverse-proxy/internal/scheduler"
+	"reverse-proxy/internal/server"
+	"reverse-proxy/internal/session"
+	"reverse-proxy/internal/upstream"
 )
 
 func main() {
@@ -232,7 +232,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v, region_keys=%d, account_keys=%d, provider_keys=%d)", cfg.Listen, cfg.APIKey != "", len(cfg.APIKeys), len(cfg.AccountKeys), len(cfg.ProviderKeys))
+	log.Printf("Reverse-Proxy listening on %s (api_key=%v, region_keys=%d, account_keys=%d, provider_keys=%d)", cfg.Listen, cfg.APIKey != "", len(cfg.APIKeys), len(cfg.AccountKeys), len(cfg.ProviderKeys))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

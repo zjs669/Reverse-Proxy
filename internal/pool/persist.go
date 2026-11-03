@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 var flushInterval = 5 * time.Second

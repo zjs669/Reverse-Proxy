@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/logfmt"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
+	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/logfmt"
+	"reverse-proxy/internal/pool"
+	"reverse-proxy/internal/upstream"
 )
 
 // Config 调度器依赖。
@@ -233,7 +233,7 @@ func (s *Scheduler) RunCheckinNow() {
 // 禁用账号跳过；无 AccessToken 的跳过；账号间限速 activityAccountDelay。
 //
 // 每号上报 N 条（ActivityReportCount，默认 5）：N 条共用同一 conversationId
-// （wb2api-<ms>），模拟同一会话内 N 轮对话——这是领养猫（buddy/first）对话量
+// （reverse-proxy-<ms>），模拟同一会话内 N 轮对话——这是领养猫（buddy/first）对话量
 // 门槛的实测刷法（chat_5 前置需 5 次对话）。requestId 各条独立（同会话多轮）。
 // 账号内 N 条之间间隔 activityReportGap（1.5s）避免秒发触发风控。
 //
@@ -263,7 +263,7 @@ func (s *Scheduler) RunActivityNow() {
 		}
 		first = false
 		// N 条共用同一 conversationId（同会话），requestId 各自独立（每条一个）。
-		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
+		cid := fmt.Sprintf("reverse-proxy-%d", time.Now().UnixMilli())
 		ok := 0
 		for i := 1; i <= count; i++ {
 			rid := fmt.Sprintf("%s-r%d", cid, i)

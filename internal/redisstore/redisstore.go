@@ -36,8 +36,8 @@ type Store interface {
 }
 
 const (
-	bindPrefix  = "wb2api:bind:"
-	stateKey    = "wb2api:state"
+	bindPrefix  = "reverse-proxy:bind:"
+	stateKey    = "reverse-proxy:state"
 	readTimeout = 3 * time.Second
 )
 

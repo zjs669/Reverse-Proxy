@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy2api/internal/auth"
+	"reverse-proxy/internal/auth"
 )
 
 func (p *Pool) Disable(uid, reason string) {
