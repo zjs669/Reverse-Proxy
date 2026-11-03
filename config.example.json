@@ -1,13 +1,6 @@
 {
   "listen": ":7863",
-  "account_keys": {
-    "qoder_1": {
-      "<uid>": "<qoder-secret>"
-    },
-    "codebuddy_1": {
-      "<uid>": "<codebuddy-secret>"
-    }
-  },
+  "account_keys": {},
   "auth_file": "./auths/auth.json",
   "state_file": "./data/state.json",
   "server": {
