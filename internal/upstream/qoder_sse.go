@@ -62,6 +62,14 @@ func ParseNestedSSE(r io.Reader, onChunk func(map[string]any) error) error {
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			var top map[string]any
 			if json.Unmarshal([]byte(payload), &top) == nil {
+				// 错误可能出现在两处（都必须判）：
+				//   1) 顶层：{"code":"105","message":"Login expired"}
+				//   2) 包在 body 里：{"body":"{\"code\":\"105\"}","statusCodeValue":403}
+				// 实测上游走第 2 种。只判顶层会把错误帧当正常 chunk 透传，
+				// 客户端永远等不到 [DONE]（表现为请求挂死到超时）。
+				if be := qoderFrameBizError(top); be != nil {
+					return be
+				}
 				if body, _ := top["body"].(string); body != "" {
 					if body == "[DONE]" {
 						return nil
@@ -72,13 +80,6 @@ func ParseNestedSSE(r io.Reader, onChunk func(map[string]any) error) error {
 							return err
 						}
 					}
-				} else if code, has := top["code"]; has && !qoderCodeOK(code) {
-					// 顶层业务错误帧：立即中断，不再等上游关闭连接。
-					msg, _ := top["message"].(string)
-					if msg == "" {
-						msg, _ = top["msg"].(string)
-					}
-					return &QoderBizError{Code: fmt.Sprint(code), Message: msg}
 				}
 			}
 		}
@@ -86,6 +87,54 @@ func ParseNestedSSE(r io.Reader, onChunk func(map[string]any) error) error {
 			return nil
 		}
 	}
+}
+
+// qoderFrameBizError 判断一帧是否携带业务错误，是则返回 *QoderBizError。
+//
+// 覆盖三种形态：
+//   - 顶层 code 非成功：{"code":"105","message":"..."}
+//   - body 内嵌错误体：{"body":"{\"code\":\"105\"}","statusCodeValue":403}（当前线上形态）
+//   - HTTP 语义失败：statusCodeValue>=400 或 statusCode=="FORBIDDEN"/"UNAUTHORIZED"
+//
+// 返回 nil 表示这一帧是正常数据帧（正常 chunk 必有 choices 字段）。
+func qoderFrameBizError(top map[string]any) *QoderBizError {
+	if code, has := top["code"]; has && !qoderCodeOK(code) {
+		msg, _ := top["message"].(string)
+		if msg == "" {
+			msg, _ = top["msg"].(string)
+		}
+		return &QoderBizError{Code: fmt.Sprint(code), Message: msg}
+	}
+	body, _ := top["body"].(string)
+	if body == "" || body == "[DONE]" {
+		return nil
+	}
+	var inner map[string]any
+	if json.Unmarshal([]byte(body), &inner) != nil {
+		return nil
+	}
+	if _, hasChoices := inner["choices"]; hasChoices {
+		return nil
+	}
+	if code, has := inner["code"]; has && !qoderCodeOK(code) {
+		msg, _ := inner["message"].(string)
+		if msg == "" {
+			msg, _ = inner["msg"].(string)
+		}
+		return &QoderBizError{Code: fmt.Sprint(code), Message: msg}
+	}
+	if v, ok := top["statusCodeValue"].(float64); ok && v >= 400 {
+		msg, _ := inner["message"].(string)
+		return &QoderBizError{Code: fmt.Sprint(int(v)), Message: msg}
+	}
+	if s, ok := top["statusCode"].(string); ok {
+		sw := strings.ToUpper(strings.TrimSpace(s))
+		if sw == "FORBIDDEN" || sw == "UNAUTHORIZED" {
+			msg, _ := inner["message"].(string)
+			return &QoderBizError{Code: sw, Message: msg}
+		}
+	}
+	return nil
 }
 
 // qoderAggregate 聚合完整嵌套 SSE 为单个 OpenAI chat.completion 响应。
@@ -236,12 +285,23 @@ func qoderStreamTo(w http.ResponseWriter, r io.Reader, model string) error {
 		}
 		return nil
 	}
+	sawFinish := false
 	err := ParseNestedSSE(r, func(chunk map[string]any) error {
 		chunk["model"] = model
 		normalizeDeltaKeys(chunk)
 		// 提取 usage（嵌套 chunk 偶尔把 usage 放在顶层）
 		if u, ok := chunk["usage"].(map[string]any); ok {
 			lastUsage = u
+		}
+		// 上游自己会发一帧 finish_reason，记下来避免末尾再补一帧（客户端会收到两个 stop）。
+		if chs, ok := chunk["choices"].([]any); ok {
+			for _, ci := range chs {
+				if c, ok := ci.(map[string]any); ok {
+					if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+						sawFinish = true
+					}
+				}
+			}
 		}
 		raw, _ := json.Marshal(chunk)
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
@@ -255,8 +315,10 @@ func qoderStreamTo(w http.ResponseWriter, r io.Reader, model string) error {
 	if err != nil {
 		return err
 	}
-	// 终帧：补 finish（usage 已在最后数据帧或此处带出），保证恰好一个 [DONE]
-	_ = writeChunk(map[string]any{}, "stop", lastUsage)
+	// 终帧：上游没发 finish 才补（否则客户端会看到两个 finish_reason:"stop"）。
+	if !sawFinish {
+		_ = writeChunk(map[string]any{}, "stop", lastUsage)
+	}
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 		return err
 	}

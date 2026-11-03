@@ -23,7 +23,8 @@
     "intl": [],
     "trae": [],
     "qoder": [],
-    "doubao": []
+    "doubao": [],
+    "deepseek": []
   },
   "schedule": {
     "checkin_hours": [9, 21],
@@ -65,6 +66,10 @@
     "breaker_cooldown_max": "6h",
     "idle_weight_per_hour": 0.5,
     "idle_weight_max": 5.0
+  },
+  "deepseek": {
+    "session_ttl": "24h",
+    "session_file": "./data/deepseek_sessions.json"
   },
   "session_sticky": {
     "enabled": true,

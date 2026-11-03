@@ -16,8 +16,53 @@ curl -sN http://127.0.0.1:7863/v1/chat/completions \
 
 ---
 
+## 与上游项目的关系（来源说明）
+
+本仓库是 **[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)** 的**魔改分支**，而后者又是 **[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)** 的增强分支（上游仓库已删除）。
+
+```text
+Sliverkiss/workbuddy2api          （原始项目，上游已删库）
+        └── linguo2625469/workbuddy2api-panel   （增强分支：Web 面板 + 成长任务 + 搜索）
+                └── zjs669/Reverse-Proxy        （本仓库：多供应商改造）
+```
+
+**血缘与许可**：上游为 MIT 协议。本仓库保留其全部原有能力（CodeBuddy 账号池调度、错误分类、熔断冷却、提示词体系、定时任务），并在此之上做多供应商扩展。原项目作者的版权与 MIT 许可声明继续有效。
+
+**本仓库相对 panel 版的主要改动**（都是「新增」，未改动原有 CodeBuddy 链路的行为）：
+
+| 改动 | 说明 |
+|---|---|
+| **Provider 抽象层** | 把硬编码在 `Client` 里的 CodeBuddy 协议抽成 `Provider` 接口（`ChatStream`/`StreamTo`/`Aggregate`/`Classify`/`FetchModels`/`RefreshToken`），按 `auth.Provider` 分派，未识别时回落 CodeBuddy |
+| **新增 Trae 供应商** | `chat_v3` 协议 + `content` parts 数组 + `X-Cloudide-Session` 头 |
+| **新增 Qoder 供应商** | COSY 私有协议 + 换表编码 + 嵌套 SSE，强制 HTTP/1.1（上游对 h2 的 SSE 返回 `INTERNAL_ERROR`） |
+| **新增 豆包 供应商** | 网页版 Cookie 鉴权 + `/chat/completion` SSE（**不支持 Function Calling**） |
+| **新增 DeepSeek 供应商** | 网页版 Bearer userToken + **每请求 PoW 求解**（内嵌官方 wasm + wazero）+ 上游会话树上下文（`chat_session_id` + `parent_message_id`） |
+| **四层鉴权** | 主密钥 / 区域密钥 / 供应商密钥 / 账号级密钥（一把 key 锁死一个号） |
+| **会话粘性** | `conversation_id → 账号` 绑定，TTL 滚动续期，可镜像 Redis |
+| **DeepSeek 会话状态** | `会话键 → {账号, chat_session_id, parent_message_id}` 持久化，换号/过期自动重建 |
+
+**与 panel 版的功能取舍**：本仓库**没有**移植 panel 的 Web 管理面板与「成长任务一键完成」（`/panel` 路由、任务中心自动化）。若你需要可视化运维面板，请直接用 panel 版；本仓库专注「多供应商协议翻译 + 账号池调度」这一层，通过 `curl` / 任意 OpenAI SDK 使用。
+
+> 详细的多供应商协议差异、踩坑记录与接入规范见 **[PROVIDERS.md](PROVIDERS.md)**。
+
+---
+
+## 使用声明
+
+与上游一致：**本项目仅限个人自用**（管理自己的账号、给本地工具提供一个 OpenAI 兼容入口）。
+
+- ❌ 禁止批量注册小号、对外售卖 API / 账号池 / 卡密分发；
+- ❌ 禁止二次加壳、加密、捆绑收费后分发；
+- ✅ 欢迎自用、反馈问题、提交 PR。
+
+使用非官方客户端可能触发上游风控或封号，风险由使用者自行承担。本项目按「原样」提供，不提供任何担保。
+
+---
+
 ## 目录
 
+- [与上游项目的关系（来源说明）](#与上游项目的关系来源说明)
+- [使用声明](#使用声明)
 - [特性](#特性)
 - [快速开始](#快速开始)
 - [配置详解](#配置详解)
@@ -36,12 +81,12 @@ curl -sN http://127.0.0.1:7863/v1/chat/completions \
 | 能力 | 说明 |
 |---|---|
 | OpenAI 协议兼容 | `POST /v1/chat/completions`（流式/非流式）、`GET /v1/models` |
-| 多供应商 | CodeBuddy（国内 cn / 国际 intl）、Trae、Qoder、豆包工作 |
+| 多供应商 | CodeBuddy（国内 cn / 国际 intl）、Trae、Qoder、豆包工作、**DeepSeek 网页版** |
 | 多账号池 | 加权选号、在途并发限制、失败换号、软冷却 + 熔断 |
 | 四层鉴权 | 主密钥 / 区域密钥 / 供应商密钥 / **账号级密钥**（一把 key 锁死一个号） |
 | 模型目录动态拉取 | `/v1/models` 直接来自上游，新增模型自动出现（豆包从网页目录解析） |
 | token 自动续期 | 按「剩余寿命」提前换新，短寿命凭证（Trae 8h）也不会断 |
-| 工具调用 | CodeBuddy / Trae / Qoder 支持 `tools` / `tool_calls`；豆包不支持（见 FAQ） |
+| 工具调用 | CodeBuddy / Trae / Qoder 支持 `tools` / `tool_calls`；豆包 / DeepSeek 不支持（见 FAQ） |
 | 会话粘性 | 同一会话尽量复用同一账号，降低上下文丢失 |
 | 定时任务 | 签到、活跃上报、token 保活（仅 CodeBuddy 体系有意义） |
 
@@ -189,6 +234,7 @@ curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <密钥>"
 | Trae | `login trae <昵称>` | **无**区域参数 |
 | Qoder | `login qoder <昵称>` | **无**区域参数 |
 | 豆包工作 | `login doubao <昵称>` | **无**区域参数，单账号固定槽位 `doubao_1` |
+| DeepSeek | `login deepseek <昵称>` | **无**区域参数，单账号固定槽位 `deepseek_1` |
 
 > `<昵称>` 只是显示名（进日志和 `auth.json`），随便取。
 > Trae/Qoder/豆包多写一个 `cn` 会被当成昵称，不会报错但键名会变。
@@ -207,6 +253,7 @@ docker exec -i reverse-proxy /app/login doubao 我的豆包 < cred.json
 | Trae | `Cloud-IDE-JWT` | trae.cn 登录 → F12 → Network → 请求头 `Authorization: Cloud-IDE-JWT <一串>` | **8 小时** |
 | Qoder | `dt-…` / `drt-…` token | qoder 登录后 F12 抓请求头，或用 `scripts/qoder_bootstrap.py` 引导 | 30 天 |
 | 豆包工作 | 账号 Cookie（`sessionid` / `ttwid` / `passport_csrf_token`） | 豆包工作客户端登录 → F12 → Network → 任一 chat 请求 → 请求头 `Cookie:` 整段 | ~30 天 |
+| DeepSeek | `userToken`（`mb5+…`） | chat.deepseek.com 登录 → F12 → Application → Local Storage → `userToken` 的 `value` 字段（或 Network 里 `Authorization: Bearer` 后那串） | 长期，失效需重登 |
 
 凭证文件格式（`cred.json`）—— **每家最少只需这些字段**（省略的字段自动补全：uid 兜底随机/缺省值、机器指纹自动生成、expiresAt 自动解析）：
 
@@ -221,6 +268,11 @@ docker exec -i reverse-proxy /app/login doubao 我的豆包 < cred.json
 
 // 豆包 —— 最少只给 sessionid（ttwid / passport_csrf_token 可选增强）
 { "sessionid": "…" }
+
+// DeepSeek —— 最少只给 accessToken（device_id / Cookie 可选）
+{ "accessToken": "mb5+…" }
+// 也可直接粘 localStorage 原文，脚本会自动取 value：
+{ "userToken": { "value": "mb5+…", "__version": "0" } }
 ```
 
 ### Windows 上粘不进去 / 卡住？
@@ -242,7 +294,7 @@ type cred.json | docker exec -i reverse-proxy /app/login doubao 我的豆包
 
 - **能自助续期**：CodeBuddy、Trae、Qoder → 交给 token 看护自动完成，基本无需管。
   - 例外：Trae 的续期接口**只接受未过期的 JWT**，一旦过期就只能重新登录（见 FAQ）。
-- **不能自助续期**：豆包 Cookie → 约每 30 天重跑一次 `login doubao`。
+- **不能自助续期**：豆包 Cookie → 约每 30 天重跑一次 `login doubao`；DeepSeek `userToken` → 上游**没有 refresh 接口**（收到 `40003` 只能重登），网关做存活校验并禁用失效号，日志会提示重跑 `login deepseek`。
 
 ---
 
@@ -426,6 +478,23 @@ WARN: [auth] trae/我的trae 凭证已于 2026-11-01 20:38 过期 … 需人工�
 **Q：豆包换模型名，回答没区别？**
 上游按账号默认档位走，模型名目前只是标签（已知限制）。但**推理强度**（`reasoning_effort`）是真生效的。
 
+**Q：DeepSeek 说不了话 / 不能执行命令？**
+DeepSeek 网页版同样**不支持 Function Calling**（请求里的 `tools` 会被忽略）。另外它每次请求都要解一次 PoW（约 40ms），且上游会话 3 天过期——过期后网关自动重建会话（对客户端透明，但会丢上下文）。
+
+**Q：DeepSeek 报 `40003` / 日志说 `session invalid`？**
+`userToken` 失效。DeepSeek 网页版**没有 refresh 接口**，只能重新登录一次：
+
+```bash
+# 浏览器登录 chat.deepseek.com → F12 → Application → Local Storage → userToken 的 value
+echo '{"accessToken":"mb5+…"}' | docker exec -i reverse-proxy /app/login deepseek 我的DS
+docker restart reverse-proxy
+```
+
+**Q：DeepSeek 多轮对话记不住上文？**
+网关按请求体里的 `metadata.conversation_id` 做会话绑定。客户端**每轮都要带同一个 `conversation_id`**；不带就会走「每轮新建会话 + 全量重放历史」模式（也能用，但更慢更费 token）。
+
+**Q：qoder 突然不能对话了（流式挂死 / 180s 后 502）？**
+通常是 `dt-` 过期且未被自动续期。当前版本会在日志里打 `凭证已自动续期` 并自动重试；若看到 `凭证失效且无 drt-/pat，无法自动续期`，重跑 `login qoder`（建议走 PAT 路线，长期有效）。详见 [PROVIDERS.md §2.3.1](PROVIDERS.md)。
 **Q：改了 `config.json` 要重新 build 吗？**
 不用。它是挂载文件，`docker restart reverse-proxy` 即可；只有改 Go 代码才 `docker compose up -d --build`。
 
@@ -444,5 +513,7 @@ WARN: [auth] trae/我的trae 凭证已于 2026-11-01 20:38 过期 … 需人工�
 - 暴露到公网前请务必配置密钥 + 反代 + HTTPS，并限制来源 IP。
 
 ## License
+
+上游 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 与 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 均为 MIT 协议，本仓库沿用。原项目版权声明继续有效。
 
 供个人学习研究使用。上游协议随时可能变化，按现状提供，不承担任何连带责任。

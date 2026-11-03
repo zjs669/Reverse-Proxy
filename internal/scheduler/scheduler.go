@@ -322,7 +322,7 @@ func (s *Scheduler) RunKeepaliveNow() {
 			continue
 		}
 		// trae 续期不需要 refreshToken（X-Cloudide-Token 换新 JWT）；其余家没有 refreshToken 就无从刷新。
-		if a.RefreshToken == "" && a.ProviderOrDefault() != "trae" {
+		if a.RefreshToken == "" && a.ProviderOrDefault() != "trae" && a.ProviderOrDefault() != "deepseek" {
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {

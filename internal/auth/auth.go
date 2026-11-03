@@ -256,6 +256,7 @@ func LoadDir(dir string) ([]*Auth, error) {
 		filepath.Join(dir, "trae*.json"),
 		filepath.Join(dir, "qoder*.json"),
 		filepath.Join(dir, "doubao*.json"),
+		filepath.Join(dir, "deepseek*.json"),
 	}
 	seen := make(map[string]bool)
 	var out []*Auth

@@ -20,6 +20,7 @@
 package upstream
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -70,6 +71,9 @@ type qoderProvider struct {
 
 	mu       sync.RWMutex
 	modelMap map[string]string // 规范化客户端名(或上游 key) -> 上游 model_key
+
+	// refreshMu 串行化凭证刷新：drt- 一次性轮换，并发刷新会互相踩。
+	refreshMu sync.Mutex
 }
 
 func (p *qoderProvider) Name() string { return "qoder" }
@@ -377,6 +381,11 @@ func (p *qoderProvider) FetchModels(c *Client, a *auth.Auth) ([]ModelInfo, error
 }
 
 // ChatStream 发起 Qoder 对话，返回原生嵌套 SSE 流（由 StreamTo/Aggregate 翻译）。
+//
+// 鉴权失败自愈：上游对过期凭证不下发 HTTP 4xx，而是在 200 的 SSE 里塞一帧
+// {"body":"{\"code\":\"105\",\"message\":\"Login expired\"}","statusCodeValue":403}。
+// 这里先偷看第一帧：若是 105/403，就用 drt-/PAT 刷新凭证后重试一次，
+// 避免「凭证一过期该号就永久不可用」（expiresAt 不可信时尤其致命）。
 func (p *qoderProvider) ChatStream(c *Client, a *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
 	var reqBody map[string]any
 	if err := json.Unmarshal(body, &reqBody); err != nil {
@@ -403,6 +412,13 @@ func (p *qoderProvider) ChatStream(c *Client, a *auth.Auth, body []byte) (io.Rea
 	} else if re, ok := reqBody["reasoningEffort"].(string); ok && re != "" {
 		reasoningEffort = re
 	}
+	return p.chatStreamOnce(c, a, modelKey, openaiMessages, clientTools, reasoningEffort, false)
+}
+
+// chatStreamOnce 执行一次对话请求；retried=true 表示这是刷新凭证后的重试，
+// 再失败就直接把错误交给上层（避免无限刷新循环）。
+func (p *qoderProvider) chatStreamOnce(c *Client, a *auth.Auth, modelKey string, openaiMessages []map[string]any,
+	clientTools []any, reasoningEffort string, retried bool) (io.ReadCloser, int, []byte, error) {
 
 	rawBody, err := BuildAgentBody(openaiMessages, modelKey, clientTools, reasoningEffort)
 	if err != nil {
@@ -437,9 +453,111 @@ func (p *qoderProvider) ChatStream(c *Client, a *auth.Auth, body []byte) (io.Rea
 		resp.Body.Close()
 		kind := p.Classify(resp.StatusCode, string(rb))
 		log.Printf("WARN: [qoder] chat uid=%s: upstream %d %s body=%s", logUID(a.UID), resp.StatusCode, kind, truncate(string(rb), 200))
+		// HTTP 403 也可能是凭证过期（部分链路直接回 403 而不是 200+105）。
+		if !retried && resp.StatusCode == http.StatusForbidden && p.tryRefreshCredential(c, a, string(rb)) {
+			return p.chatStreamOnce(c, a, modelKey, openaiMessages, clientTools, reasoningEffort, true)
+		}
 		return nil, resp.StatusCode, rb, nil
 	}
-	return monitorBody(resp.Body, c.IdleTimeout, nil), resp.StatusCode, nil, nil
+	// 上游鉴权失败走的是「HTTP 200 + SSE 里一帧 105」，必须先看首帧。
+	//
+	// 注意不能用 br.Peek(4096)：Peek(n) 会阻塞到读满 n 字节或 EOF，
+	// 而错误帧只有 ~150 字节且上游不关连接 → 直接挂死到超时。
+	// 这里只 ReadString('\n') 读第一行（读到换行就返回），再把这一行
+	// 拼回流的头部交给下游，语义等价且不会阻塞。
+	br := bufio.NewReaderSize(resp.Body, 64*1024)
+	firstLine, ferr := br.ReadString('\n')
+	if ferr != nil && ferr != io.EOF {
+		resp.Body.Close()
+		return nil, 0, nil, fmt.Errorf("qoder: read first frame: %w", ferr)
+	}
+	if be := qoderPeekBizError([]byte(firstLine)); be != nil {
+		resp.Body.Close()
+		log.Printf("WARN: [qoder] chat uid=%s: 流内鉴权失败 code=%s %s", logUID(a.UID), be.Code, be.Message)
+		if !retried && p.tryRefreshCredential(c, a, be.Message) {
+			return p.chatStreamOnce(c, a, modelKey, openaiMessages, clientTools, reasoningEffort, true)
+		}
+		// 刷新也没救：转成 403 交给上层按 session_dead 处理（禁用该号并提示重登）。
+		return nil, http.StatusForbidden, []byte(be.Error()), nil
+	}
+	return monitorBody(&qoderPrefixedBody{prefix: []byte(firstLine), br: br, rc: resp.Body}, c.IdleTimeout, nil), resp.StatusCode, nil, nil
+}
+
+// qoderPrefixedBody 让「已 Peek 过的 bufio.Reader」继续充当流：
+// Peek 不消费字节，但 resp.Body 已经被 bufio 读走了一部分到内部缓冲，
+// 必须从 br 读（而不是 resp.Body），否则会丢开头。
+type qoderPrefixedBody struct {
+	// prefix 已从 br 读走、需要重新拼回流的字节（首帧探活用）。
+	prefix []byte
+	br     *bufio.Reader
+	rc     io.ReadCloser
+}
+
+func (b *qoderPrefixedBody) Read(p []byte) (int, error) {
+	if len(b.prefix) > 0 {
+		n := copy(p, b.prefix)
+		b.prefix = b.prefix[n:]
+		return n, nil
+	}
+	return b.br.Read(p)
+}
+
+func (b *qoderPrefixedBody) Close() error { return b.rc.Close() }
+
+// qoderPeekBizError 从流首部字节里判断是否为鉴权/业务错误帧（不消费流）。
+func qoderPeekBizError(peek []byte) *QoderBizError {
+	for _, raw := range strings.Split(string(peek), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue
+		}
+		var top map[string]any
+		if json.Unmarshal([]byte(payload), &top) != nil {
+			continue // 首帧不完整（被 Peek 截断），交给正常解析路径
+		}
+		if be := qoderFrameBizError(top); be != nil {
+			return be
+		}
+	}
+	return nil
+}
+
+// tryRefreshCredential 尝试刷新凭证（drt- 轮换或 PAT 兑换），成功返回 true。
+// 刷新后原地更新 a 并落盘，后续请求即用新凭证。
+// tryRefreshCredential 尝试刷新凭证（drt- 轮换或 PAT 兑换），成功返回 true。
+//
+// 并发安全：drt- 是**一次性轮换**的。若多个请求同时撞 105 各刷一次，
+// 后到者拿旧 drt 必然失败，还可能把已换到的新 token 覆盖回旧值。
+// 因此用 refreshMu 单飞，并在拿到锁后比对 failedToken 判断是否已被别人换过。
+func (p *qoderProvider) tryRefreshCredential(c *Client, a *auth.Auth, reason string) bool {
+	if strings.TrimSpace(a.RefreshToken) == "" && strings.TrimSpace(a.ExtraVal("pat")) == "" {
+		log.Printf("WARN: [qoder] uid=%s 凭证失效（%s）且无 drt-/pat，无法自动续期", logUID(a.UID), truncate(reason, 80))
+		return false
+	}
+	// 触发本次刷新的「失败 token」：等锁后若 a.AccessToken 已变，说明别的 goroutine
+	// 刚刷过，直接用新 token 重试即可。
+	failedToken := strings.TrimSpace(a.AccessToken)
+
+	p.refreshMu.Lock()
+	defer p.refreshMu.Unlock()
+
+	if cur := strings.TrimSpace(a.AccessToken); cur != "" && cur != failedToken {
+		log.Printf("INFO: [qoder] uid=%s 凭证已由并发请求续期，直接重试", logUID(a.UID))
+		return true
+	}
+	if err := p.RefreshToken(c, a); err != nil {
+		log.Printf("WARN: [qoder] uid=%s 自动续期失败: %v", logUID(a.UID), err)
+		return false
+	}
+	if err := a.SaveAtomic(); err != nil {
+		log.Printf("ERR: [qoder] uid=%s 续期后落盘失败: %v", logUID(a.UID), err)
+	}
+	log.Printf("INFO: [qoder] uid=%s 凭证已自动续期（触发原因：%s）", logUID(a.UID), truncate(reason, 60))
+	return true
 }
 
 // StreamTo 把 Qoder 原生嵌套 SSE 翻译为 OpenAI SSE 写入 w。

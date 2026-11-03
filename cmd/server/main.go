@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/dsconv"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
@@ -102,7 +103,14 @@ func main() {
 		return 0
 	}
 
+	// DeepSeek 上游会话状态（chat_session_id + parent_message_id）。
+	// 必须持久化：上游会话 3 天过期、换号即失效，网关靠这份映射复用同一窗口的会话。
+	dsStore := dsconv.New(dsconv.Config{
+		TTL:  cfg.DeepSeekSessionTTL,
+		Path: cfg.DeepSeek.SessionFile,
+	})
 	up := upstream.New()
+	up.SetDeepSeekStore(dsStore)
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
@@ -189,6 +197,25 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// deepseek 会话状态：定期清理过期条目并落盘（30s 一次，仅在有变更时真正写盘）。
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				dsStore.GC()
+				_ = dsStore.Flush()
+				return
+			case <-t.C:
+				dsStore.GC()
+				if err := dsStore.Flush(); err != nil {
+					log.Printf("WARN: [deepseek] 会话状态落盘失败: %v", err)
+				}
+			}
+		}
+	}()
 	go sch.Run(ctx)
 
 	srv := &http.Server{
@@ -199,6 +226,7 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
+		_ = dsStore.Flush() // DeepSeek 会话坐标同样落盘，重启后上下文不丢
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
@@ -212,7 +240,7 @@ func main() {
 }
 
 // knownProviders 网关已实现的上游（与 upstream.registerProviders 对齐）。
-var knownProviders = []string{"codebuddy", "trae", "qoder", "doubao"}
+var knownProviders = []string{"codebuddy", "trae", "qoder", "doubao", "deepseek"}
 
 // logAccountHealth 启动时体检凭证：过期/临期打 WARN 并给出续期命令，缺账号的供应商也提示一句。
 // 否则这些账号只在第一次真实请求时以 503 / 拉模型失败暴露，排查成本高（交接文档 §5.2~§5.4）。
@@ -266,7 +294,7 @@ func renewCommand(provider, region string) string {
 	if provider == "codebuddy" {
 		return "./login codebuddy cn <昵称>"
 	}
-	if provider == "trae" || provider == "qoder" || provider == "doubao" {
+	if provider == "trae" || provider == "qoder" || provider == "doubao" || provider == "deepseek" {
 		return "./login " + provider + " <昵称>"
 	}
 	return "./login " + provider + " cn <昵称>"

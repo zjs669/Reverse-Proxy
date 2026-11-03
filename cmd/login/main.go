@@ -71,7 +71,7 @@ var regions = map[string]region{
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: login <provider> <name>\n  provider: codebuddy|trae|qoder|doubao\n  name:     账号显示名（可空；codebuddy 国际版用 login codebuddy intl <name>）")
+		fatal("usage: login <provider> <name>\n  provider: codebuddy|trae|qoder|doubao|deepseek\n  name:     账号显示名（可空；codebuddy 国际版用 login codebuddy intl <name>）")
 	}
 	provider := strings.ToLower(os.Args[1])
 
@@ -120,6 +120,8 @@ func main() {
 		loginQoder(nickname, authFile, key)
 	case "doubao":
 		loginPaste("doubao", nickname, authFile, key, doubaoWorkInstructions)
+	case "deepseek":
+		loginPaste("deepseek", nickname, authFile, key, deepseekInstructions)
 	default:
 		fatal("unknown provider %q (want codebuddy|trae|qoder|doubao)", provider)
 	}
@@ -139,6 +141,8 @@ func keyPrefix(provider, region string) string {
 		return "qoder"
 	case "doubao":
 		return "doubao"
+	case "deepseek":
+		return "deepseek"
 	}
 	return provider
 }
@@ -343,6 +347,26 @@ const doubaoWorkInstructions = `豆包工作（Doubao Work / 豆包桌面客户�
 
 命令示例：  login doubao 我的豆包`
 
+
+const deepseekInstructions = `DeepSeek 网页版（chat.deepseek.com）凭证获取方式：
+  1) 浏览器登录 https://chat.deepseek.com
+  2) F12 → Application → Local Storage → https://chat.deepseek.com
+     找到 userToken，其值是 {"value":"<你的 token>","__version":"0"}，复制 value 字段；
+     或者 F12 → Network → 任选一个 /api/v0/ 请求 → Request Headers →
+     Authorization: Bearer <你的 token>，复制 Bearer 后面那串。
+
+  续期：DeepSeek 没有 refresh 接口，token 失效（网关日志报 code=40003）后
+  重新从浏览器复制一次，再跑同一条命令覆盖即可。
+
+  粘贴格式（二选一）：
+    A) 只要 token（最简，推荐）：
+       { "accessToken":"<userToken>" }
+    B) 带设备指纹 / Cookie（更贴近浏览器，可选）：
+       { "accessToken":"<userToken>", "uid":"deepseek-1",
+         "extra": { "device_id":"<uuid>", "ds_session_id":"<cookie>" } }
+
+命令示例：  login deepseek 我的DeepSeek`
+
 func loginPaste(provider, nickname, authFile, key, instructions string) {
 	fmt.Println(instructions)
 	fmt.Println()
@@ -355,6 +379,10 @@ func loginPaste(provider, nickname, authFile, key, instructions string) {
 	// 豆包：允许直接粘贴 F12 复制的整段 Cookie（扁平 key/value），自动归一字段。
 	if provider == "doubao" {
 		input = adaptDoubaoCredential(input)
+	}
+	// DeepSeek：允许直接粘贴 localStorage 的 userToken 或 users/current 响应片段。
+	if provider == "deepseek" {
+		input = adaptDeepseekCredential(input)
 	}
 
 	accessToken, _ := input["accessToken"].(string)
@@ -373,8 +401,8 @@ func loginPaste(provider, nickname, authFile, key, instructions string) {
 
 	expiresAt := jwtExp(accessToken)
 	if expiresAt <= 0 {
-		if provider == "doubao" {
-			// sessionid 固定约 30 天过期；写入真实过期时刻便于网关到期提醒与自动失效。
+		if provider == "doubao" || provider == "deepseek" {
+			// sessionid / userToken 固定约 30 天过期；写入真实过期时刻便于网关到期提醒与自动失效。
 			expiresAt = time.Now().Add(30 * 24 * time.Hour).Unix()
 		} else {
 			expiresAt = farFuture
@@ -477,8 +505,13 @@ func loginQoder(nickname, authFile, key string) {
 		}
 	}
 
-	expiresAt := int64(0)
+	// dt- 的寿命不可从凭证本身读出（不透明串），但实测约 30 天，且上游会静默让它过期。
+	// 这里必须写一个**有限的**估算值：早先写 farFuture(2100) 会让 NeedsRefresh 永远为 false，
+	// token watch 从不刷新，凭证一过期该号就永久 "Login expired"（qoder 就是这样挂的）。
+	// 写 30 天后，配合 refresh_window 会提前续期；即便估算偏早，也只是多刷几次。
+	expiresAt := time.Now().Add(30 * 24 * time.Hour).Unix()
 	if pat != "" {
+		// PAT 换来的 jt- 观测寿命 24h，更短。
 		expiresAt = time.Now().Add(24 * time.Hour).Unix()
 	}
 
@@ -491,11 +524,7 @@ func loginQoder(nickname, authFile, key string) {
 	if refreshToken != "" {
 		entry["refreshToken"] = refreshToken
 	}
-	if expiresAt > 0 {
-		entry["expiresAt"] = expiresAt
-	} else {
-		entry["expiresAt"] = farFuture
-	}
+	entry["expiresAt"] = expiresAt
 	entry["extra"] = extra
 
 	if err := writeEntry(authFile, key, entry); err != nil {
@@ -568,6 +597,67 @@ func adaptDoubaoCredential(input map[string]any) map[string]any {
 		promote("passport_csrf_token", "passport_csrf_token")
 		promote("passport_csrf_token_default", "passport_csrf_token")
 	}
+	if len(extra) > 0 {
+		out["extra"] = extra
+	}
+	return out
+}
+
+
+// adaptDeepseekCredential 把用户从浏览器复制的凭证归一为 loginPaste 需要的结构。
+// 支持三种输入形态：
+//   - {"accessToken":"<token>"}                     结构化（原样通过）
+//   - {"userToken":{"value":"<token>"}}             localStorage 原始 JSON
+//   - {"token":"<token>","id":"<uid>"}              users/current 响应片段
+// uid 缺省填 deepseek-1（DeepSeek 账号 id 是 UUID，用固定标签更好认）。
+func adaptDeepseekCredential(input map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range input {
+		out[k] = v
+	}
+	// accessToken 缺省时从几种常见形态里捞。
+	if s, _ := out["accessToken"].(string); strings.TrimSpace(s) == "" {
+		// localStorage userToken: {"value":"<token>","__version":"0"}
+		if m, ok := out["userToken"].(map[string]any); ok {
+			if v, _ := m["value"].(string); strings.TrimSpace(v) != "" {
+				out["accessToken"] = strings.TrimSpace(v)
+			}
+		}
+	}
+	if s, _ := out["accessToken"].(string); strings.TrimSpace(s) == "" {
+		if v, _ := out["token"].(string); strings.TrimSpace(v) != "" {
+			out["accessToken"] = strings.TrimSpace(v)
+		}
+	}
+	// uid 缺省：优先用 users/current 的账号 id（UUID），否则固定标签。
+	if u, _ := out["uid"].(string); strings.TrimSpace(u) == "" {
+		if id, _ := out["id"].(string); strings.TrimSpace(id) != "" {
+			out["uid"] = strings.TrimSpace(id)
+		} else {
+			out["uid"] = "deepseek-1"
+		}
+	}
+	// extra 里只留真正会被出站请求用到的字段（device_id / ds_session_id / hwwafsesid）。
+	extra := map[string]any{}
+	if e, ok := out["extra"].(map[string]any); ok {
+		for k, v := range e {
+			extra[k] = v
+		}
+	}
+	promote := func(src, dst string) {
+		v, _ := out[src].(string)
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, exists := extra[dst]; !exists {
+			extra[dst] = v
+		}
+	}
+	promote("device_id", "device_id")
+	promote("ds_session_id", "ds_session_id")
+	promote("hwwafsesid", "hwwafsesid")
+	promote("HWWAFSESID", "hwwafsesid")
 	if len(extra) > 0 {
 		out["extra"] = extra
 	}

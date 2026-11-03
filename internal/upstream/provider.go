@@ -110,5 +110,6 @@ func (c *Client) registerProviders() {
 		"trae":        &traeProvider{c: c},
 		"qoder":       &qoderProvider{c: c},
 		"doubao":      doubaoWorkProvider{doubaoProvider{c: c}},
+		"deepseek":    &deepseekProvider{c: c},
 	}
 }

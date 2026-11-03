@@ -162,6 +162,19 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	// DeepSeek DeepSeek 网页版供应商的会话状态配置。
+	// 上下文靠上游会话树（chat_session_id + parent_message_id）传递，网关必须把
+	// 「客户端会话键 → 上游会话坐标」持久化，否则每次请求都会新建会话、丢上下文。
+	DeepSeek struct {
+		// SessionTTL 本地会话坐标的有效期，默认 "24h"。
+		// 必须显著小于上游的 ttl_seconds（实测 259200 = 3 天），否则会拿着过期
+		// chat_session_id 反复撞 biz_code=1（每次都要多花一次 create + 一次重试）。
+		SessionTTL string `json:"session_ttl"`
+		// SessionFile 会话坐标持久化文件，默认 "./data/deepseek_sessions.json"。
+		// 空字符串 = 纯内存（重启丢上下文，但会话会自动重建）。
+		SessionFile string `json:"session_file"`
+	} `json:"deepseek"`
+
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`
@@ -169,6 +182,9 @@ type Config struct {
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
+
+	// DeepSeek 会话配置（解析后）
+	DeepSeekSessionTTL time.Duration `json:"-"`
 
 	// token 自动续期看护（解析后）
 	TokenWatchIntervalDur   time.Duration            `json:"-"`
@@ -217,6 +233,8 @@ func Default() *Config {
 	c.Pool.BreakerCooldownMax = "6h"
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
+	c.DeepSeek.SessionTTL = "24h"
+	c.DeepSeek.SessionFile = "./data/deepseek_sessions.json"
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -346,14 +364,14 @@ func (c *Config) normalize() error {
 	if c.ProviderKeyToProvider == nil {
 		c.ProviderKeyToProvider = make(map[string]string)
 	}
-	knownProviders := map[string]bool{"codebuddy": true, "trae": true, "qoder": true, "doubao": true}
+	knownProviders := map[string]bool{"codebuddy": true, "trae": true, "qoder": true, "doubao": true, "deepseek": true}
 	for secret, provider := range c.ProviderKeys {
 		if strings.TrimSpace(secret) == "" {
 			return fmt.Errorf("provider_keys: 密钥不能为空")
 		}
 		pv := strings.ToLower(strings.TrimSpace(provider))
 		if !knownProviders[pv] {
-			return fmt.Errorf("provider_keys[%q]: %q 不是已知供应商（codebuddy / trae / qoder / doubao）", maskKey(secret), provider)
+			return fmt.Errorf("provider_keys[%q]: %q 不是已知供应商（codebuddy / trae / qoder / doubao / deepseek）", maskKey(secret), provider)
 		}
 		if _, dup := c.APIKeys[secret]; dup {
 			return fmt.Errorf("provider_keys[%q]: 其密钥同时出现在 api_keys 中（区域 key 与供应商 key 互斥）", maskKey(secret))
@@ -386,6 +404,16 @@ func (c *Config) normalize() error {
 	}
 	if c.BreakerCooldownMaxD, err = time.ParseDuration(c.Pool.BreakerCooldownMax); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown_max: %w", err)
+	}
+	// deepseek 会话坐标 TTL：空值回落 24h；非法值 fail fast（配错会导致每轮都重建会话）。
+	if c.DeepSeek.SessionTTL == "" {
+		c.DeepSeek.SessionTTL = "24h"
+	}
+	if c.DeepSeekSessionTTL, err = time.ParseDuration(c.DeepSeek.SessionTTL); err != nil {
+		return fmt.Errorf("deepseek.session_ttl: %w", err)
+	}
+	if c.DeepSeekSessionTTL <= 0 {
+		return fmt.Errorf("deepseek.session_ttl: %q 非法（需为正时长，如 \"24h\"）", c.DeepSeek.SessionTTL)
 	}
 	if c.SessionTTL, err = time.ParseDuration(c.SessionSticky.TTL); err != nil {
 		return fmt.Errorf("session_sticky.ttl: %w", err)

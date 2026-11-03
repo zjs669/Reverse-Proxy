@@ -101,7 +101,7 @@ func (s *Scheduler) RunTokenWatchNow() {
 		prov := a.ProviderOrDefault()
 		// 没有 refreshToken 的账号里只有 trae 能自助续期（X-Cloudide-Token 换新 JWT，
 		// 见 trae.go refreshViaGetUserToken）；其余家没有 refreshToken 就无从刷新。
-		if a.RefreshToken == "" && prov != "trae" {
+		if a.RefreshToken == "" && prov != "trae" && prov != "deepseek" {
 			continue
 		}
 		// 被「凭证类」原因禁用、但手上令牌仍在有效期内 → 直接解禁，不必等续期窗口。

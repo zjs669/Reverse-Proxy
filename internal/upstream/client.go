@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/dsconv"
 	"workbuddy2api/internal/logfmt"
 )
 
@@ -282,6 +283,13 @@ type Client struct {
 
 	// providers 上游供应商注册表（按 auth.Auth.Provider 分派）；由 registerProviders 填充。
 	providers map[string]Provider
+
+	// dsStore DeepSeek 上游会话状态（chat_session_id + parent_message_id）。
+	// 仅 deepseek provider 使用；nil 时该 provider 退化为「每次新建会话」的无状态模式。
+	// 由 main 在装配阶段通过 SetDeepSeekStore 注入（配置项 deepseek.session_ttl / session_file）。
+	dsStore *dsconv.Store
+	// dsStoreOnce 保证 dsStore 的惰性初始化只发生一次（并发安全）。
+	dsStoreOnce sync.Once
 }
 
 // isIntlDomain 报告 domain 是否指向国际版（codebuddy.ai）。
@@ -338,6 +346,30 @@ func (c *Client) chatBase(a *auth.Auth) string {
 		return c.ChatBaseIntl
 	}
 	return c.ChatBaseCN
+}
+
+// SetDeepSeekStore 注入 DeepSeek 上游会话状态存储（由 main 装配）。
+// 未注入时 deepseek provider 退化为无状态模式：每次请求新建会话、prompt 拼全部历史。
+func (c *Client) SetDeepSeekStore(s *dsconv.Store) {
+	if s == nil {
+		return
+	}
+	c.dsStore = s
+	c.dsStoreOnce.Do(func() {}) // 标记已初始化，防止被懒创建覆盖
+}
+
+// deepSeekStore 返回 DeepSeek 会话存储；nil 时惰性建一个纯内存实例，
+// 保证 provider 内部无需到处判空（退化行为：重启即丢，但进程内多轮仍可用）。
+//
+// 用 sync.Once 而不是裸 if：ChatStream 会并发调用，裸判空是数据竞争
+// （两个 goroutine 同时看到 nil，各建一个 store，后写的覆盖前者、丢失会话）。
+func (c *Client) deepSeekStore() *dsconv.Store {
+	c.dsStoreOnce.Do(func() {
+		if c.dsStore == nil {
+			c.dsStore = dsconv.New(dsconv.Config{})
+		}
+	})
+	return c.dsStore
 }
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。

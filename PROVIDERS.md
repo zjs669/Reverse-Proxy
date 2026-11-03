@@ -1,5 +1,8 @@
 # 多供应商接入指南（PROVIDERS.md）
 
+> **来源**：本仓库是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的魔改分支（后者源自已删库的 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，MIT 协议）。本文件描述的是本仓库**新增的多供应商层**；CodeBuddy 原有链路的协议细节请参考上游文档。
+
+
 `workbuddy2api` 在原有 CodeBuddy 反代基础上，扩展了 **Provider 抽象层**，支持在**同一网关**里同时挂多个上游供应商：
 
 | provider | 上游 | 状态 | 说明 |
@@ -8,6 +11,7 @@
 | `trae` | trae-api-cn.mchost.guru（国内版） | ✅ 已支持 | chat_v3 协议，SSE 事件 `output`/`done`/`[DONE]` |
 | `qoder` | gateway.qoder.com.cn（国内版） | ✅ 已支持 | COSY 私有协议 + 换表编码 + 嵌套 SSE，HTTP/1.1 强制 |
 | `doubao` | www.doubao.com（豆包网页版） | ✅ 已支持（**仅对话**） | Cookie 鉴权 + `/chat/completion` SSE；**不支持 Function Calling** |
+| `deepseek` | chat.deepseek.com（DeepSeek 网页版） | ✅ 已支持（**仅对话**） | Bearer userToken + 每请求 PoW + 会话树上下文；**不支持 Function Calling** |
 
 > Qoder 上游对 HTTP/2 的 SSE 会返回 `INTERNAL_ERROR`，网关已为 Qoder 单独禁用 HTTP/2 协商（`Client.QoderHTTP`，`TLSNextProto` 置空）。
 >
@@ -170,8 +174,105 @@
 2. F12 → Application → Cookies → `https://www.doubao.com`，复制 `sessionid`（以及可选的 `ttwid`、`passport_csrf_token`）；
 3. 用 `scripts/doubao_session.py` 生成 `auths/auth.json` 的 `doubao_<n>` 条目，或在网页 F12 → Network 里任取一个 `chat/completion` 请求的 URL，把整段 Cookie 交给该脚本解析后写入 `auth.json`。
 
+### 2.3.1 Qoder 凭证失效与自动续期（2026-11-02 修复）
+
+**现象**：qoder 账号 `last_success` 正常、`disabled=false`，但对话请求挂死（流式永不结束）或 180s 后 502。
+
+**根因（两个叠加的 bug）**：
+
+1. **上游鉴权失败藏在 SSE 里，不在 HTTP 状态码**。上游返回 `HTTP 200` + 一帧（`code` 在 **body 内部**，不在顶层）：
+
+   ```text
+   data:{"headers":{...},"body":"{\"code\":\"105\",\"message\":\"Login expired\"}","statusCodeValue":403,"statusCode":"FORBIDDEN"}
+   ```
+
+   旧解析只判顶层 `code`，于是把错误帧当正常 chunk 透传 → 客户端永远等不到 `[DONE]`，请求挂到超时。
+
+2. **`expiresAt` 写成了 `farFuture`（2100 年）**。`login` 的手填 `dt-/drt-` 分支写 `farFuture`，导致 `NeedsRefresh` 永远为 false，token watch 从不刷新 → `dt-` 一过期该号就永久 `Login expired`，且没有任何日志。
+
+**修复**：
+
+- `ParseNestedSSE` 同时判顶层 `code` 与 body 内嵌错误（`qoderFrameBizError`）；正常帧靠 `choices` 字段区分，不会误判。
+- `ChatStream` 先读首帧探活：命中 105/403 → 用 `drt-`/`pat` 自动续期 → 重试一次。**注意不能用 `bufio.Peek(4096)`**：`Peek(n)` 会阻塞到读满 n 字节或 EOF，而错误帧只有约 150 字节且上游不关连接，会直接挂死。必须 `ReadString` 读首行再拼回流头。
+- `login qoder` 手填 `dt-/drt-` 时写 30 天估算过期（`dt-` 实测寿命约 30 天），不再写 `farFuture`。
+- 流式终帧只在**上游没发过** `finish_reason` 时补发，避免客户端收到两个 `stop`。
+
+**运维提示**：日志出现 `[qoder] uid=xxx 凭证已自动续期（触发原因：Login expired）` 属正常自愈；若出现 `凭证失效且无 drt-/pat，无法自动续期`，需重新 `./login qoder <昵称>`（建议走 PAT 路线，PAT 长期有效）。
+
 ---
 
+---
+
+### 2.4 DeepSeek（provider="deepseek"）
+
+```jsonc
+{
+  "provider": "deepseek",
+  "uid": "deepseek-1",              // 任意唯一标识；也可直接填账号 UUID
+  "nickname": "deepseek-1",
+  "accessToken": "<userToken>",     // 必需
+  "expiresAt": 1796200000,
+  "extra": {
+    "device_id": "<uuid>",          // 可选，缺省用内置常量
+    "ds_session_id": "<cookie>",    // 可选，带上更贴近浏览器指纹
+    "hwwafsesid": "<cookie>"        // 可选
+  }
+}
+```
+
+**最少 JSON**：`{"accessToken":"<userToken>"}` —— 鉴权只需 `Authorization: Bearer <userToken>`；Cookie 与 `x-device-id` 实测均可缺省。
+
+**userToken 获取（授权登录需要什么）**：
+
+只需要**一样东西**：浏览器登录态里的 `userToken`。三种取法任选其一：
+
+| 方式 | 操作 | 拿到的形态 |
+|---|---|---|
+| A. localStorage（最稳） | 登录 `https://chat.deepseek.com` → F12 → Application → Local Storage → 选中该域名 → 找 `userToken`，值是 `{"value":"<token>","__version":"0"}`，**复制 `value` 字段** | `mb5+...` 开头的 64 字符串 |
+| B. Network 抓包 | F12 → Network → 任选一个 `/api/v0/` 请求 → Request Headers → `Authorization: Bearer <token>`，复制 Bearer 后面那串 | 同上 |
+| C. 一条命令自查 | 已登录页面 Console 执行 `JSON.parse(localStorage.userToken).value` | 同上 |
+
+拿到后执行 `./login deepseek <昵称>`，粘贴下面任一形态（脚本自动归一，不用手改字段）：
+
+```jsonc
+{ "accessToken": "mb5+..." }                                    // 最简
+{ "userToken": { "value": "mb5+...", "__version": "0" } }        // 直接粘 localStorage 原文
+{ "token": "mb5+...", "id": "<账号UUID>" }                       // 直接粘 users/current 响应片段
+```
+
+**不需要**：Cookie（`ds_session_id` / `HWWAFSESID` 实测非必需）、密码、短信验证码、任何 API Key。
+
+**有效期**：`userToken` 是不透明的 48 字节串，无内嵌过期时间，实测长期有效；失效表现为上游 `code=40003`，网关会禁用该号并提示重登。重新执行同一条 `./login deepseek <昵称>` 覆盖即可（键名固定 `deepseek_1`，不会无限增长）。
+
+
+**协议要点**（`internal/upstream/deepseek.go`，2026-11-02 浏览器抓包实测）：
+- 新建会话：`POST /api/v0/chat_session/create` body `{}` → `chat_session.id`（UUID）+ `ttl_seconds=259200`（**3 天**）。
+- 对话：`POST /api/v0/chat/completion`，body 为 `{chat_session_id, parent_message_id, model_type, prompt, ref_file_ids, thinking_enabled, search_enabled, action, preempt}`。
+- **PoW 必需且一次性**：先 `POST /api/v0/chat/create_pow_challenge` 拿 challenge，用官方 `sha3_wasm_bg.wasm` 的 `wasm_solve` 求解，base64(JSON) 放 `x-ds-pow-response` 头。同一个头复用第二次返回 `40301`，所以**每个请求都要重解**（实测 difficulty=144000，wazero 下约 40ms）。wasm 已内嵌进二进制（`internal/upstream/sha3_wasm_bg.wasm`，`//go:embed`）。
+  - **wasm 只编译一次、实例池化复用**：`CompileModule` 走 `sync.Once`，实例由 `deepseekPowPool` 复用，不再每请求 `InstantiateModule`（那会重建 4MB 线性内存，与求解本身同量级开销）。因 wasm 的 bump allocator 只增不减，单实例累计分配超过 1MB 即回收重建，避免线性内存无限增长。
+- **会话上下文靠上游会话树**：`chat_session_id` 固定 + `parent_message_id` 传上轮的 `response_message_id`（2/4/6…），上游自动带全部前文。首轮 `parent_message_id` 必须 `null`（传 `0` 报 `biz_code 26`）。
+- **错误恒 HTTP 200**：真实状态在 body 信封里 —— `code`（40003 token 失效 / 40300 缺 PoW / 40301 PoW 无效 / 40029 IP 限制 / 40012 封号 / 50006 禁言）、`data.biz_code`（1 会话不存在 / 26 消息 id 无效 / 15 思考额度超限）。网关的 `Classify` 先判信封、再按状态码兜底。
+- **SSE 有两种正文增量帧**，必须都处理：带路径的 `{"p":"response/fragments/-1/content","o":"APPEND","v":"..."}` 与**裸帧** `{"v":" How"}`（无 `p` 字段）。首帧 `{"v":{"response":{...}}}` 是全量**前缀快照**（例如回答 `8642` 时快照是 `864`），后续增量在其后追加 —— 只输出增量会丢前缀，全量重发会重复。
+- 模型：`model_type ∈ default / expert / vision`（浏览器 `settings?scope=model` 的 `model_configs`；当前账号只有 `default` 的 `switchable=true`，故 `/v1/models` 只列出 `deepseek-instant`）。思考开关是独立布尔，由请求的 `reasoning_effort` 推导（`low/light/none` → 关，其余 → 开），开启后 SSE 多 `THINK` 片段，网关映射到 `reasoning_content`。
+- **不支持 Function Calling**：网页版无 tools 透传，请求体里的 `tools` 会被忽略。
+
+**会话状态与上下文策略**：
+- 请求体带会话键（`metadata.conversation_id` / `conversation_id` 等，与粘性路由同一口径）→ 网关持久化「会话键 → `{账号, chat_session_id, parent_message_id}`」，prompt 只发本轮问题，历史由上游会话树带。
+- 无会话键 → 每次新建会话，prompt 拼全部历史（`用户: … / 助手: …`），即「每轮重新导入前文」。
+- 换账号 / 超过 `deepseek.session_ttl` / 上游 `biz_code=1` 或 `26` → 自动丢弃坐标、重建会话并重试一次（对客户端透明）。
+- 配置：`"deepseek": {"session_ttl": "24h", "session_file": "./data/deepseek_sessions.json"}`。`session_ttl` 必须**显著小于上游 3 天**。
+
+**续期**：DeepSeek **没有 refresh 接口**（前端收到 40003 直接跳登录页，token 是不透明 48 字节 blob，`users/current` 原样回显、不轮换）。因此 `RefreshToken` 实现为**存活校验**：`GET /api/v0/users/current` 返回 40003/40012 即判 `session_dead` 并禁用该号。失效后重新 `./login deepseek <昵称>` 覆盖即可；`expiresAt` 按 30 天估算，到期前网关会 WARN 提醒。
+
+**已知限制与坑**（详见 §8.4）：
+
+- 上游业务错误恒 `HTTP 200`，`code`/`biz_code` 在 body 里；网关 `Classify` 先判信封再判状态码。
+- `dsParseEnvelope` 必须把业务错误改写成 `>=400` 的 `Status`，否则调用方 `if status >= 400` 会漏判成成功。
+- PoW 申请失败也可能是 `40003`（token 失效），必须保留错误分类，不能当传输层错误直接换号。
+- SSE 有两种正文增量帧（带 `p` 的与裸帧 `{"v":"..."}`），且首帧快照是**前缀**不是全文。
+- wasm 编译走 `sync.Once`、实例池化复用；单实例累计分配超 1MB 回收重建（bump allocator 只增不减）。
+
+---
 ## 3. 路由与选号
 
 - `withAuth` 中，`account_keys` 命中的密钥通过反向索引 `AccountKeyToUID` 把该账号 UID 下传 context。
@@ -316,4 +417,9 @@ curl /v1/chat (doubao 账号密钥)     → 503 no_healthy_account（尚未放�
 5. **`Classify` 决定账号生死**：401/403 归 `ErrSessionDead` 会直接禁号；凭证临期（如 JWT `exp`）必须正确写 `expiresAt`，否则每次对话都触发刷新、无 refreshToken 时直接拒（trae 就是典型）。
 6. **provider 字段与账号标签解耦**：`auth.json` 顶层键只是给人看的标签，真正路由看条目内 `provider`/`uid`；改标签不影响选号。
 7. **回退别串号**：`handler.go` `modelList` 拉取失败时按**绑定账号自身 provider** 回退其 `StaticModels`，不要无脑回落 codebuddy 表（已修）。
-8. **provider 特有协议**：trae 模型名带 `__dev`、`content` 必须 parts 数组、`X-Cloudide-Session(source_id)` 必需；qoder 只认 `dt-`（喂 `jt-` 返回 `105`）、必须禁 HTTP/2（用 `Client.QoderHTTP`）；doubao 无 Function Calling。
+8. **provider 特有协议**：trae 模型名带 `__dev`、`content` 必须 parts 数组、`X-Cloudide-Session(source_id)` 必需；qoder 只认 `dt-`（喂 `jt-` 返回 `105`）、必须禁 HTTP/2（用 `Client.QoderHTTP`）；doubao / deepseek 无 Function Calling。
+9. **上游鉴权失败可能藏在 HTTP 200 的 SSE 里（qoder 105）**：错误帧形如 `{"body":"{\"code\":\"105\"}","statusCodeValue":403}`，`code` 在 body 内部。只判顶层 `code` 会把错误帧当正常 chunk 透传，客户端永远等不到 `[DONE]`（流式挂死、非流式 180s 超时）。→ 解析器必须同时判顶层与 body 内嵌错误，并用 `choices` 字段区分正常帧。
+10. **`bufio.Peek(n)` 会阻塞到读满 n 字节**：用它探活上游首帧时，短帧（约 150 字节）+ 上游不关连接 = 直接挂死。→ 用 `ReadString` 读首行，再把该行拼回流头交给下游。
+11. **`expiresAt` 写 `farFuture` 等于关闭自动续期**：`NeedsRefresh` 永远为 false，token watch 从不触发，凭证一过期该号就永久失效且无日志。→ 对不透明凭证写**估算**寿命（如 dt- 按 30 天），宁可多刷几次。
+12. **DeepSeek 的 SSE 有两种正文增量帧**：带路径的 `{"p":"response/fragments/-1/content","o":"APPEND","v":"..."}` 和**裸帧** `{"v":" How"}`（无 `p`）。只认前者会静默丢掉裸帧的全部内容——表现是「回答被截断成快照前缀」，而且短回答恰好看不出来（首帧快照就够）。→ 两种都要处理，且快照是**前缀**不是全文（快照 `864` + APPEND `2` = `8642`），既不能丢也不能重复。
+13. **上游错误恒 HTTP 200 时，`Classify` 必须先判信封再判状态码**：网关为了让 handler 走错误分支，会把 200 改写成 502；若 `Classify` 先看 `status>=500`，就会把 `biz_code=1`（会话失效，应重建）误判成 `ErrServer`（上游故障，应换号），重试逻辑永远不触发。
