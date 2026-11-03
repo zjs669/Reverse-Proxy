@@ -174,7 +174,7 @@ curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <密钥>"
   },
 
   "models": {                          // 排除清单（非白名单），空 = 全放行
-    "codebuddy": [], "intl": [], "trae": [], "qoder": [], "doubao": []
+    "codebuddy": [], "intl": [], "trae": [], "qoder": [], "doubao": [], "deepseek": []
   },
 
   "schedule": {
@@ -191,6 +191,8 @@ curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <密钥>"
   "pool":            { "max_in_flight": 3, "breaker_threshold": 3,
                        "breaker_cooldown": "30m", "breaker_cooldown_max": "6h" },
   "session_sticky":  { "enabled": true, "ttl": "30m", "gc_interval": "5m" },
+  "deepseek":        { "session_ttl": "24h",              // 上游会话坐标有效期（上游 3 天到期）
+                       "session_file": "./data/deepseek_sessions.json" },
   "cooldown":        { "soft_rate": "600s", "soft_rate_max": "2h", "disabled": false },
   "upstream":        { "timeout_seconds": 120 },
   "server":          { "max_body_mb": 8 }
@@ -340,6 +342,18 @@ auto:low | auto:medium | auto:xhigh | fast:low …
 | `doubao-2.1-lite` | 豆包 2.1 Lite | 256k |
 | `doubao-2.1-pro` | 工作任务 Pro | 256k |
 
+### DeepSeek 网页版（3 档）
+
+| 对外模型名 | 上游 `model_type` | 上下文 |
+|---|---|---|
+| `deepseek-instant` | `default`（Instant） | 2.6M 字符 |
+| `deepseek-expert` | `expert` | 2.6M 字符 |
+| `deepseek-vision` | `vision` | 2.6M 字符 |
+
+> 只列出账号实际 `switchable=true` 的档位（多数账号仅 Instant 可切）。
+> 思考模式由 `reasoning_effort` 触发（`low`/`none` 关闭，其余开启），开启后上游多一个 `THINK` 片段，
+> 网关映射成 OpenAI 的 `reasoning_content`。
+
 > `:low / :medium / :high / :xhigh` 是**推理强度**后缀，会映射成上游的思考深度。
 > 不带后缀通常落到默认档。豆包的推理强度由请求体的 `reasoning_effort` 控制。
 
@@ -391,7 +405,7 @@ for chunk in resp:
 }
 ```
 
-Only CodeBuddy / Trae / Qoder 会把 `tool_calls` 原样回给你；豆包只会返回纯文本。
+Only CodeBuddy / Trae / Qoder 会把 `tool_calls` 原样回给你；豆包 / DeepSeek 只会返回纯文本。
 
 ---
 
@@ -410,7 +424,7 @@ Only CodeBuddy / Trae / Qoder 会把 `tool_calls` 原样回给你；豆包只会
 ## 账号池与路由
 
 ```
-客户端 ──Bearer key──▶ 网关 ──选号──▶ 上游账号 ──协议翻译──▶ CodeBuddy/Trae/Qoder/豆包
+客户端 ──Bearer key──▶ 网关 ──选号──▶ 上游账号 ──协议翻译──▶ CodeBuddy/Trae/Qoder/豆包/DeepSeek
                         │
                         ├─ 账号级密钥：锁死单号，不轮换
                         ├─ 供应商/区域密钥：在该范围内轮换
@@ -439,6 +453,9 @@ Only CodeBuddy / Trae / Qoder 会把 `tool_calls` 原样回给你；豆包只会
 ```
 
 窗口取值原则：**必须显著小于凭证寿命**。默认 `30m`，`trae` 覆盖为 `2h`（寿命 8h）。
+
+> **DeepSeek 不走换新，只做存活校验**：上游没有 refresh 接口，`RefreshToken` 调用 `/api/v0/users/current` 判定是否 40003；失效即禁用该号并在日志给出重登命令。
+> 因此 `expiresAt` 只是「估算寿命」（登录时按 30 天写入），真正是否可用以上游返回为准。
 
 配置：
 
