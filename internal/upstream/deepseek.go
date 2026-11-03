@@ -11,7 +11,6 @@
 // 凭证来源（auth JSON，provider="deepseek"）：
 //   accessToken = userToken（浏览器 localStorage 的 userToken.value，或 Network 里
 //                 "Authorization: Bearer xxx" 后面那串）
-//   extra.device_id    可选，缺省用内置常量
 //   extra.device_id   可选，缺省用进程内随机值
 //
 // 协议要点（全部经实测确认，不是推测）：
@@ -27,6 +26,8 @@
 //   - SSE 首帧 {"v":{"response":{...}}} 是全量快照，之后
 //     {"p":"response/fragments/-1/content","o":"APPEND","v":"..."} 是增量
 //   - 模型档位 model_type ∈ default / expert / vision；思考开关是独立布尔 thinking_enabled
+//   - 网关**默认开启**深度思考与联网搜索；上游错误码表里没有「搜索与思考互斥」，
+//     只有 search/thinking 与**文件**互斥（本实现不传 ref_file_ids，故安全）
 //
 // 上下文策略：
 //   - 请求体带会话键（metadata.conversation_id 等）→ 复用 chat_session_id +
@@ -161,19 +162,45 @@ func deepseekModelID(modelType string) string {
 	}
 }
 
-// deepseekReasoning 由请求的 reasoning_effort 推导 thinking_enabled。
-// DeepSeek 网页只有开/关两档，故 light/low/none 归 false，其余非空归 true。
-func deepseekReasoning(reqBody map[string]any) bool {
-	raw, ok := reqBody["reasoning_effort"].(string)
-	if !ok {
-		return false
+// deepseekThinking 决定 thinking_enabled（深度思考）。
+//
+// **默认开启**：DeepSeek 网页版的思考模式对推理题提升明显，网关按「默认开」
+// 发请求。客户端要关可显式传：
+//   - {"thinking": false}            最直观
+//   - {"thinking_enabled": false}    同义（与上游字段同名）
+//   - {"reasoning_effort": "none"}   也认（兼容 OpenAI 风格）
+// 其余情况（含 low/medium/high/未传）一律开启——DeepSeek 只有开/关两档，
+// 没有中间档位，把 low 映射成关闭会让客户端「要更强的推理反而更弱」。
+func deepseekThinking(reqBody map[string]any) bool {
+	if v, ok := reqBody["thinking"].(bool); ok {
+		return v
 	}
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "none", "light", "low", "off", "false", "minimal":
-		return false
-	default:
-		return true
+	if v, ok := reqBody["thinking_enabled"].(bool); ok {
+		return v
 	}
+	if raw, ok := reqBody["reasoning_effort"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "none", "off", "false", "disabled":
+			return false
+		}
+	}
+	return true
+}
+
+// deepseekSearch 决定 search_enabled（联网搜索）。
+//
+// **默认开启**：网页版前端默认就是开着的（settings 里 search_state_on_launch="on"），
+// 且错误码表里没有「搜索与思考互斥」，只有 search 与**文件**互斥
+// （SEARCH_CANNOT_WITH_FILE）——本实现不传文件，因此可安全同时开启。
+// 客户端要关可传 {"search": false} 或 {"search_enabled": false}。
+func deepseekSearch(reqBody map[string]any) bool {
+	if v, ok := reqBody["search"].(bool); ok {
+		return v
+	}
+	if v, ok := reqBody["search_enabled"].(bool); ok {
+		return v
+	}
+	return true
 }
 
 // Classify DeepSeek 错误分类。
@@ -241,7 +268,9 @@ func deepseekClassifyEnvelope(body string) (ErrKind, bool) {
 	case 0:
 		return ErrNone, true
 	case dsBizThinkingQuota:
-		return ErrSoftRate, true
+		// 思考额度用完，但普通对话仍可用。归 ErrBadParams（不罚号、只轮转）；
+		// 真正的降级（关掉 thinking 同号重试）由 ChatStream 内部先做一次。
+		return ErrBadParams, true
 	case dsBizThinkingWithFile:
 		return ErrBadParams, true
 	case dsBizInvalidSession, dsBizInvalidParent:
@@ -539,11 +568,15 @@ func (p *deepseekProvider) ChatStream(c *Client, a *auth.Auth, body []byte) (io.
 		}
 	}
 
-	// 最多试两次：第一次可能撞 biz_code=1（会话过期）/ 26（parent 失效），
-	// 这两种都是「坐标失效」而非账号问题，重建后重试一次即可。
+	// 两类「可自愈」失败各自最多重试一次：
+	//   a) 会话坐标失效（biz_code=1 会话过期 / 26 parent 无效）→ 重建会话
+	//   b) 思考额度用完（biz_code=15）→ 同号关掉 thinking 重试
+	// 两者都**不罚账号**：a 是坐标问题；b 是账号思考额度用完但普通对话仍可用。
 	var lastStatus int
 	var lastBody []byte
-	for attempt := 0; attempt < 2; attempt++ {
+	rebuiltSession := false
+	degradedThinking := false
+	for attempt := 0; attempt < 3; attempt++ {
 		rc, status, respBody, err := p.chatStreamOnce(c, a, reqBody, sessKey, &entry)
 		if err != nil {
 			return nil, status, respBody, err
@@ -555,8 +588,23 @@ func (p *deepseekProvider) ChatStream(c *Client, a *auth.Auth, body []byte) (io.
 		if p.Classify(status, string(respBody)) != ErrBadParams {
 			return nil, status, respBody, nil
 		}
-		// 坐标失效：清本地记录并重建（biz_code=26 也可以只重置 parent，
+		// b) 思考额度超限：关掉思考、同号重试一次（账号健康，不该被换掉）。
+		if dsIsThinkingQuota(respBody) {
+			if degradedThinking {
+				return nil, status, respBody, nil
+			}
+			degradedThinking = true
+			reqBody["thinking"] = false
+			reqBody["thinking_enabled"] = false
+			log.Printf("INFO: [deepseek] uid=%s 思考额度已用完，关闭深度思考后重试（同号）", logUID(a.UID))
+			continue
+		}
+		// a) 坐标失效：清本地记录并重建（biz_code=26 也可以只重置 parent，
 		// 但统一重建更简单，代价是一次多余的 create）。
+		if rebuiltSession {
+			return nil, status, respBody, nil
+		}
+		rebuiltSession = true
 		store.Delete(sessKey)
 		entry = dsconv.Entry{}
 		log.Printf("INFO: [deepseek] 会话坐标失效 uid=%s key=%q，重建会话后重试",
@@ -565,13 +613,24 @@ func (p *deepseekProvider) ChatStream(c *Client, a *auth.Auth, body []byte) (io.
 	return nil, lastStatus, lastBody, nil
 }
 
+// dsIsThinkingQuota 判定响应是否表示「思考额度用完」（biz_code=15）。
+func dsIsThinkingQuota(body []byte) bool {
+	var env dsEnvelope
+	if json.Unmarshal(body, &env) != nil {
+		return false
+	}
+	return env.Data.BizCode == dsBizThinkingQuota
+}
+
 // chatStreamOnce 执行一次对话请求（不含重试）。
 func (p *deepseekProvider) chatStreamOnce(c *Client, a *auth.Auth, reqBody map[string]any,
 	sessKey string, entry *dsconv.Entry) (io.ReadCloser, int, []byte, error) {
 
 	clientModel, _ := reqBody["model"].(string)
 	modelType := deepseekModelType(clientModel)
-	thinking := deepseekReasoning(reqBody)
+	// 深度思考 + 联网搜索默认都开（见 deepseekThinking / deepseekSearch 注释）。
+	thinking := deepseekThinking(reqBody)
+	search := deepseekSearch(reqBody)
 
 	// 有会话键 → 只发本轮问题（历史由上游会话树带）；
 	// 无会话键 → 拼全部历史（上游无状态）。
@@ -615,7 +674,7 @@ func (p *deepseekProvider) chatStreamOnce(c *Client, a *auth.Auth, reqBody map[s
 		"prompt":            prompt,
 		"ref_file_ids":      []any{},
 		"thinking_enabled":  thinking,
-		"search_enabled":    false,
+		"search_enabled":    search,
 		"action":            nil,
 		"preempt":           false,
 	}
@@ -903,6 +962,8 @@ func deepseekWalk(r io.Reader, onDelta func(content, reasoning, finish string) e
 	var emittedText, emittedThink strings.Builder
 	curThinking := false
 	finished := false
+	// sawResponseFrame 是否已见过 response 相关帧，用于区分正文裸帧与搜索状态裸帧。
+	sawResponseFrame := false
 	flushFinal := func() {
 		if finished {
 			return
@@ -979,6 +1040,7 @@ func deepseekWalk(r io.Reader, onDelta func(content, reasoning, finish string) e
 		// 2) 全量快照：补发尚未产出的前缀
 		if v, ok := env["v"].(map[string]any); ok {
 			if resp, ok := v["response"].(map[string]any); ok {
+				sawResponseFrame = true
 				for _, fr := range deepseekFragments(resp) {
 					typ, _ := fr["type"].(string)
 					content, _ := fr["content"].(string)
@@ -1006,6 +1068,7 @@ func deepseekWalk(r io.Reader, onDelta func(content, reasoning, finish string) e
 		v := env["v"]
 		// 3) 片段类型切换（新片段从空开始）
 		if p == "response/fragments" {
+			sawResponseFrame = true
 			if arr, ok := v.([]any); ok {
 				for _, item := range arr {
 					fr, ok := item.(map[string]any)
@@ -1040,8 +1103,13 @@ func deepseekWalk(r io.Reader, onDelta func(content, reasoning, finish string) e
 		//   a) 带路径的显式增量：{"p":"response/fragments/-1/content","o":"APPEND","v":"!"}
 		//   b) 裸增量帧：         {"v":" How"}          ← 没有 p 字段
 		// 只认 a) 会丢掉 b) 的全部内容（回答会被截断成快照前缀）。
+		//
+		// 但裸帧必须收紧：开联网搜索后，同一条流里还会混入别的裸字符串帧
+		// （搜索进度/状态文案）。它们都出现在首个 response 快照**之前**，
+		// 若一律当正文输出，用户会在回答里看到搜索提示语。
+		// 故裸帧额外要求 sawResponseFrame（已见过 response 快照或 fragments 切换）。
 		if s, ok := v.(string); ok && s != "" {
-			isDelta := p == "response/fragments/-1/content" || p == ""
+			isDelta := p == "response/fragments/-1/content" || (p == "" && sawResponseFrame)
 			if isDelta {
 				if curThinking {
 					emittedThink.WriteString(s)

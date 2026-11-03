@@ -168,28 +168,74 @@ func TestDeepseekModelMapping(t *testing.T) {
 	}
 }
 
-// TestDeepseekReasoning 思考开关由 reasoning_effort 推导。
-func TestDeepseekReasoning(t *testing.T) {
+// TestDeepseekThinking 深度思考默认开启，可按多种方式显式关闭。
+func TestDeepseekThinking(t *testing.T) {
 	cases := []struct {
-		effort any
-		want   bool
+		name string
+		body map[string]any
+		want bool
 	}{
-		{nil, false},
-		{"", false},
-		{"low", false},
-		{"none", false},
-		{"medium", true},
-		{"high", true},
-		{"auto", true},
+		{"未传 → 默认开", map[string]any{}, true},
+		{"thinking=false 关", map[string]any{"thinking": false}, false},
+		{"thinking=true 开", map[string]any{"thinking": true}, true},
+		{"thinking_enabled=false 关", map[string]any{"thinking_enabled": false}, false},
+		{"reasoning_effort=none 关", map[string]any{"reasoning_effort": "none"}, false},
+		{"reasoning_effort=low 仍开", map[string]any{"reasoning_effort": "low"}, true},
+		{"reasoning_effort=high 开", map[string]any{"reasoning_effort": "high"}, true},
 	}
 	for _, c := range cases {
-		body := map[string]any{}
-		if c.effort != nil {
-			body["reasoning_effort"] = c.effort
+		if got := deepseekThinking(c.body); got != c.want {
+			t.Errorf("%s: deepseekThinking=%v want %v", c.name, got, c.want)
 		}
-		if got := deepseekReasoning(body); got != c.want {
-			t.Errorf("deepseekReasoning(%v)=%v want %v", c.effort, got, c.want)
+	}
+}
+
+// TestDeepseekSearch 联网搜索默认开启，可显式关闭。
+func TestDeepseekSearch(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]any
+		want bool
+	}{
+		{"未传 → 默认开", map[string]any{}, true},
+		{"search=false 关", map[string]any{"search": false}, false},
+		{"search_enabled=false 关", map[string]any{"search_enabled": false}, false},
+		{"search=true 开", map[string]any{"search": true}, true},
+	}
+	for _, c := range cases {
+		if got := deepseekSearch(c.body); got != c.want {
+			t.Errorf("%s: deepseekSearch=%v want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestDeepseekWalk_SearchStatusFramesIgnored 开联网搜索后，流里会混入搜索状态裸帧
+// （出现在首个 response 快照之前）。这些帧不能当正文输出。
+func TestDeepseekWalk_SearchStatusFramesIgnored(t *testing.T) {
+	sse := strings.Join([]string{
+		"event: ready",
+		`data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}`,
+		"",
+		// 搜索状态帧：裸字符串，出现在 response 快照之前
+		`data: {"v":"正在搜索..."}`,
+		"",
+		`data: {"p":"search_status","o":"SET","v":"SEARCHING"}`,
+		"",
+		// 真正的回答
+		`data: {"v":{"response":{"message_id":2,"fragments":[{"type":"RESPONSE","content":"答案"}]}}}`,
+		"",
+		`data: {"p":"response/fragments/-1/content","o":"APPEND","v":"是 2"}`,
+		"",
+		`data: {"p":"response/status","o":"SET","v":"FINISHED"}`,
+		"",
+	}, "\n")
+	var text string
+	if err := deepseekWalk(strings.NewReader(sse),
+		func(c, r, f string) error { text += c; return nil }, nil, nil); err != nil {
+		t.Fatalf("deepseekWalk: %v", err)
+	}
+	if text != "答案是 2" {
+		t.Fatalf("搜索结果帧不能混入正文，got=%q want=%q", text, "答案是 2")
 	}
 }
 
@@ -209,7 +255,7 @@ func TestDeepseekClassify(t *testing.T) {
 		{"PoW 无效", `{"code":40301,"msg":"INVALID_POW_RESPONSE","data":null}`, ErrServer},
 		{"会话不存在", `{"code":0,"msg":"","data":{"biz_code":1,"biz_msg":"invalid chat session id"}}`, ErrBadParams},
 		{"消息 id 无效", `{"code":0,"msg":"","data":{"biz_code":26,"biz_msg":"invalid message id"}}`, ErrBadParams},
-		{"思考额度超限", `{"code":0,"msg":"","data":{"biz_code":15,"biz_msg":"THINKING_QUOTA_EXCEEDED"}}`, ErrSoftRate},
+		{"思考额度超限（不罚号，由 ChatStream 关思考重试）", `{"code":0,"msg":"","data":{"biz_code":15,"biz_msg":"THINKING_QUOTA_EXCEEDED"}}`, ErrBadParams},
 		{"成功", `{"code":0,"msg":"","data":{"biz_code":0,"biz_data":{}}}`, ErrNone},
 	}
 	for _, c := range cases {

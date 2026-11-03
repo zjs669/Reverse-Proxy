@@ -255,7 +255,13 @@
 - **会话上下文靠上游会话树**：`chat_session_id` 固定 + `parent_message_id` 传上轮的 `response_message_id`（2/4/6…），上游自动带全部前文。首轮 `parent_message_id` 必须 `null`（传 `0` 报 `biz_code 26`）。
 - **错误恒 HTTP 200**：真实状态在 body 信封里 —— `code`（40003 token 失效 / 40300 缺 PoW / 40301 PoW 无效 / 40029 IP 限制 / 40012 封号 / 50006 禁言）、`data.biz_code`（1 会话不存在 / 26 消息 id 无效 / 15 思考额度超限）。网关的 `Classify` 先判信封、再按状态码兜底。
 - **SSE 有两种正文增量帧**，必须都处理：带路径的 `{"p":"response/fragments/-1/content","o":"APPEND","v":"..."}` 与**裸帧** `{"v":" How"}`（无 `p` 字段）。首帧 `{"v":{"response":{...}}}` 是全量**前缀快照**（例如回答 `8642` 时快照是 `864`），后续增量在其后追加 —— 只输出增量会丢前缀，全量重发会重复。
-- 模型：`model_type ∈ default / expert / vision`（浏览器 `settings?scope=model` 的 `model_configs`；当前账号只有 `default` 的 `switchable=true`，故 `/v1/models` 只列出 `deepseek-instant`）。思考开关是独立布尔，由请求的 `reasoning_effort` 推导（`low/light/none` → 关，其余 → 开），开启后 SSE 多 `THINK` 片段，网关映射到 `reasoning_content`。
+- 模型：`model_type ∈ default / expert / vision`（浏览器 `settings?scope=model` 的 `model_configs`；当前账号只有 `default` 的 `switchable=true`，故 `/v1/models` 只列出 `deepseek-instant`）。
+- **深度思考与联网搜索默认都开启**（`thinking_enabled=true` + `search_enabled=true`）：
+  - 思考开启后 SSE 多 `THINK` 片段，网关映射为 OpenAI 的 `reasoning_content`（流式与非流式都带）。
+  - 搜索默认开是跟网页版前端对齐（`settings` 里 `search_state_on_launch="on"`）；上游错误码里**没有**「搜索与思考互斥」，只有 search/thinking 与**文件**互斥（`SEARCH_CANNOT_WITH_FILE` / `THINKING_CANNOT_BE_WITH_FILE`），本实现不传 `ref_file_ids`，因此可安全并存。
+  - 关闭方式（请求体顶层）：`{"thinking": false}` 或 `{"thinking_enabled": false}` 关思考；`{"search": false}` 或 `{"search_enabled": false}` 关搜索；`{"reasoning_effort": "none"}` 也认。
+  - 思考额度用完（`biz_code=15`）时网关会**同号关闭思考重试一次**（账号本身健康，不该被换掉）；仍失败才返回错误。
+  - 开搜索后流里会混入搜索状态帧（裸字符串，出现在首个 `response` 快照之前），解析器已按「见过 response 快照」过滤，不会混进正文。
 - **不支持 Function Calling**：网页版无 tools 透传，请求体里的 `tools` 会被忽略。
 
 **会话状态与上下文策略**：

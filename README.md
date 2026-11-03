@@ -351,8 +351,13 @@ auto:low | auto:medium | auto:xhigh | fast:low …
 | `deepseek-vision` | `vision` | 2.6M 字符 |
 
 > 只列出账号实际 `switchable=true` 的档位（多数账号仅 Instant 可切）。
-> 思考模式由 `reasoning_effort` 触发（`low`/`none` 关闭，其余开启），开启后上游多一个 `THINK` 片段，
-> 网关映射成 OpenAI 的 `reasoning_content`。
+>
+> **深度思考与联网搜索默认开启**：
+>
+> - 思考开启后上游多一个 `THINK` 片段，网关映射成 OpenAI 的 `reasoning_content`（流式/非流式都有）。
+> - 搜索默认开，与网页版前端一致；两者不互斥（上游只限制它们与**文件**同时使用，本网关不传文件）。
+> - 要关掉：请求体加 `{"thinking": false}` / `{"search": false}`（或 `thinking_enabled` / `search_enabled`）。
+> - 思考额度用完（`biz_code=15`）会自动**同号关思考重试**，不会把健康的号换掉。
 
 > `:low / :medium / :high / :xhigh` 是**推理强度**后缀，会映射成上游的思考深度。
 > 不带后缀通常落到默认档。豆包的推理强度由请求体的 `reasoning_effort` 控制。
@@ -388,6 +393,23 @@ resp = client.chat.completions.create(
 for chunk in resp:
     print(chunk.choices[0].delta.content or "", end="")
 ```
+
+### 关闭深度思考 / 联网搜索（DeepSeek）
+
+```bash
+curl -s http://127.0.0.1:7863/v1/chat/completions \
+  -H "Authorization: Bearer $REVERSE_PROXY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-instant",
+    "thinking": false,
+    "search": false,
+    "messages": [{"role": "user", "content": "1+1=?"}]
+  }'
+```
+
+> 默认两者都开；显式传 `false` 才关。思考内容在流式里走 `delta.reasoning_content`，
+> 非流式在 `message.reasoning_content`。
 
 ### 工具调用（Agent / IDE 后端）
 
@@ -511,6 +533,17 @@ echo '{"accessToken":"mb5+…"}' | docker exec -i reverse-proxy /app/login deeps
 docker restart reverse-proxy
 ```
 
+**Q：DeepSeek 能关掉深度思考 / 联网搜索吗？**
+两者默认都开。请求体顶层加字段即可关：
+
+```jsonc
+{ "model": "deepseek-instant",
+  "thinking": false,      // 关深度思考（等价 thinking_enabled:false / reasoning_effort:"none"）
+  "search": false,        // 关联网搜索（等价 search_enabled:false）
+  "messages": [{"role":"user","content":"你好"}] }
+```
+
+> 关掉思考会更快更省，但推理/数学题质量会下降；关掉搜索则不会再看网页。
 **Q：DeepSeek 多轮对话记不住上文？**
 网关按请求体里的 `metadata.conversation_id` 做会话绑定。客户端**每轮都要带同一个 `conversation_id`**；不带就会走「每轮新建会话 + 全量重放历史」模式（也能用，但更慢更费 token）。
 
