@@ -264,8 +264,8 @@ docker exec -i reverse-proxy /app/login doubao 我的豆包 < cred.json
 凭证文件格式（`cred.json`）—— **每家最少只需这些字段**（省略的字段自动补全：uid 兜底随机/缺省值、机器指纹自动生成、expiresAt 自动解析）：
 
 ```jsonc
-// Trae —— 必填 accessToken + uid
-{ "accessToken": "<Cloud-IDE-JWT 原文>", "uid": "<X-Uid>" }
+// Trae —— 最少只给 accessToken（X-Uid ← data.id、X-Cloudide-Session ← data.source_id、expiresAt ← exp 全自动解析）
+{ "accessToken": "<Cloud-IDE-JWT 原文>" }
 
 // Qoder —— 最简：只给 PAT（login 自动兑换 jobToken + 生成机器指纹 + 兜底 uid）
 { "pat": "pt-…" }

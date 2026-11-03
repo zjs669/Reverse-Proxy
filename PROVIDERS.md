@@ -95,17 +95,20 @@
 }
 ```
 
-**最少 JSON**：`{"accessToken":"<Cloud-IDE-JWT 原文>","uid":"<X-Uid>"}` —— 必填就这两个；`refreshToken`/`extra` 可省（`expiresAt` 由向导从 JWT `exp` 自动解析、`extra.sourceId` 从 JWT `data.source_id` 自动解析）。
+**最少 JSON**：`{"accessToken":"<Cloud-IDE-JWT 原文>"}` —— **只给 accessToken 就够了**。`uid`（X-Uid ← `data.id`）、`expiresAt`（← `exp`）、`extra.sourceId`（← `data.source_id`）全部由向导从 JWT 载荷自动解析；`refreshToken` 可省。
 
 - **请求头（缺一不可）**：
   - `Authorization: Cloud-IDE-JWT <jwt>` ← `accessToken` 原样填入（Bearer 风格的 `Cloud-IDE-JWT ` 前缀由网关加）
   - `X-Cloudide-Token: <jwt>` ← 与 `accessToken` 同源
   - `X-Uid: <uid>` ← 账号标识
-  - **`X-Cloudide-Session: <source_id>` ← 必需！值取自 JWT 的 `payload.data.source_id`**（即你贴的那串 `9VPsQzKsIeka_M02NxXo4AdvJxPZUePYoadSSNmLNXM=.18e2a7a0272c8183`）。缺失时上游会拒绝或限流。网关已自动从 `accessToken` 解析并发送，凭证里的 `extra.sourceId` 即为此值。
+  - **`X-Cloudide-Session: <source_id>` ← 必需！值取自 JWT 的 `payload.data.source_id`**。缺失时上游会拒绝或限流。
+    取值优先级：`extra.sourceId`（显式覆盖）→ **从当前 `accessToken` 自动解析**（默认路径）。
+    不存死的原因是 token 看护换新 JWT 后 `source_id` 会变，存死会拿旧会话打上游。
+    `login` 向导也会把解析结果写进 `extra.sourceId`，方便肉眼核对。
 - 模型名需带 `__dev` 后缀（网关自动补全）；`messages[].content` 必须是 `parts` 数组。
 - **`expiresAt` 由 login 向导自动从 JWT 的 `exp` 字段解析写入**（无需手填）；缺失会导致网关每次对话都尝试刷新、无 refreshToken 时直接拒绝。JWT 是无状态 session 令牌，通常只有几小时有效，过期后取新 JWT 重跑向导即可。
 - **已知现象**：Trae 上游对新账号/免费档可能直接返回"exceeded the rate limit"作为正常 SSE chunk（非 HTTP 429）。这是账号侧限流，不是网关问题；换账号或等冷却后可正常对话。
-- **Token 获取**：跑 `./login trae cn <昵称>`（或容器内 `/app/login trae cn <昵称>`），粘贴 `Cloud-IDE-JWT` 后向导自动解析 `exp→expiresAt`、`data.source_id→extra.sourceId`，写进 `auth.json` 的 `trae_<n>` 条目。
+- **Token 获取**：跑 `./login trae <昵称>`（或容器内 `/app/login trae <昵称>`；Trae **没有**区域参数，多写一个 `cn` 会被当成昵称），粘贴 `Cloud-IDE-JWT` 后向导自动解析 `exp→expiresAt`、`data.source_id→extra.sourceId`，写进 `auth.json` 的 `trae_<n>` 条目。
 - ⚠️ Trae 刷新协议（ExchangeToken）细节未经实机验证；刷新失败会禁用账号，重新取 JWT 写回即可。
 
 ### 2.2 Qoder（provider="qoder"）

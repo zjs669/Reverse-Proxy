@@ -10,6 +10,10 @@ config.json.testbak
 
 # ---- AI 会话/记忆目录（可能含账号标识）----
 .workbuddy/
+.workbuddy-ai/
+
+# ---- 临时凭证/授权辅助脚本（含真实 token、uid、session）----
+.creds/
 
 # ---- 本地构建产物 ----
 /login

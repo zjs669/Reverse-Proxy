@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,56 @@ import (
 	"sync"
 	"time"
 )
+
+// JWTSourceID 从 Cloud-IDE-JWT 的载荷里取 data.source_id（不验签，只读载荷）。
+//
+// 为什么不在 auth.json 里存死：Trae 的 X-Cloudide-Session 必须与**当前** JWT 同源，
+// 而 token 看护每 8h 会换一枚新 JWT（source_id 可能随之变化）。存死会让续期后的号
+// 带着旧 session 打上游，表现就是"刚续期就 401/限流"。所以以令牌本身为准。
+func JWTSourceID(token string) string {
+	return JWTDataString(token, "source_id")
+}
+
+// JWTDataString 读取 JWT 载荷 data 对象里的字符串字段（不验签）。
+// Trae 的 Cloud-IDE-JWT 把账号标识放在 data 下：data.id（= X-Uid）、
+// data.source_id（= X-Cloudide-Session）、data.tenant_id。三者都能从令牌本身推出来，
+// 用户不必再去 F12 里逐个翻请求头。
+func JWTDataString(token, key string) string {
+	if key == "" {
+		return ""
+	}
+	d := jwtPayload(token)
+	if d == nil {
+		return ""
+	}
+	data, _ := d["data"].(map[string]any)
+	if data == nil {
+		return ""
+	}
+	v, _ := data[key].(string)
+	return strings.TrimSpace(v)
+}
+
+// jwtPayload 解出 JWT 的载荷对象（不验签，只做 base64url 解码）。
+func jwtPayload(token string) map[string]any {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	s := strings.TrimRight(parts[1], "=")
+	if pad := len(s) % 4; pad != 0 {
+		s += strings.Repeat("=", 4-pad)
+	}
+	b, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		return nil
+	}
+	var p map[string]any
+	if err := json.Unmarshal(b, &p); err != nil {
+		return nil
+	}
+	return p
+}
 
 // Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或手写扁平形）。
 type Auth struct {

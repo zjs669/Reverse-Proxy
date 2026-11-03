@@ -454,8 +454,14 @@ func (p *traeProvider) applyChatHeaders(req *http.Request, a *auth.Auth, modelNa
 	req.Header.Set("x-app-version-code", appVer)
 	req.Header.Set("x-ide-version-code", appVer)
 	// X-Cloudide-Session：JWT payload.data.source_id（用户登录会话标识），
-	// 缺失时部分上游接口会拒绝或限流，故始终携带（值为空则跳过）。
-	if sid := strings.TrimSpace(a.ExtraVal("sourceId")); sid != "" {
+	// 缺失时部分上游接口会拒绝或限流，故始终携带。
+	// 取值优先级：extra.sourceId（用户显式覆盖）→ 从当前 JWT 自动解析。
+	// 后者是主路径：token 看护换新 JWT 后 source_id 可能变，存死会带旧会话打上游。
+	sid := strings.TrimSpace(a.ExtraVal("sourceId"))
+	if sid == "" {
+		sid = auth.JWTSourceID(a.AccessToken)
+	}
+	if sid != "" {
 		req.Header.Set("X-Cloudide-Session", sid)
 	}
 }

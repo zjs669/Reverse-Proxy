@@ -36,6 +36,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"reverse-proxy/internal/auth"
 )
 
 const (
@@ -322,13 +324,15 @@ const traeInstructions = `Trae 凭证获取方式（任选其一）：
   1) 客户端：登录后 JWT 缓存在 %APPDATA%\Trae\ / ~/.trae\ 下，搜索 cloud_ide_jwt / access_token / x_uid
   2) 浏览器 trae.cn 登录后 DevTools → Application → Local/Session Storage 找 token 与 uid
   3) 抓包：请求头 Authorization: Cloud-IDE-JWT <jwt> 与 X-Uid: <uid>
-请粘贴如下 JSON（refreshToken / extra 可选）：
+请粘贴如下 JSON（**最少只要 accessToken**，其余全部自动解析）：
 {
   "accessToken": "<Cloud-IDE-JWT>",
-  "uid": "<X-Uid>",
+  "uid": "<X-Uid，可省>",
   "refreshToken": "<可选>",
   "extra": { "appId":"...", "appVersion":"...", "sourceId":"..." }
-}`
+}
+说明：uid（X-Uid）、X-Cloudide-Session（data.source_id）、expiresAt（exp）
+     均由向导从 JWT 载荷自动解析，不用去 F12 里逐个翻请求头。`
 
 const doubaoWorkInstructions = `豆包工作（Doubao Work / 豆包桌面客户端）凭证获取方式：
   打开豆包工作客户端并登录（账号自带积分额度）→ F12 → Network → 任一 chat 请求 →
@@ -391,6 +395,25 @@ func loginPaste(provider, nickname, authFile, key, instructions string) {
 	uid = strings.TrimSpace(uid)
 	refreshToken, _ := input["refreshToken"].(string)
 	extra := normalizeExtra(input["extra"])
+	// Trae：X-Cloudide-Session（data.source_id）与 X-Uid（data.id）都在 JWT 载荷里，
+	// 用户很难自己从 F12 翻出来，这里统一自动解析补齐，最少只需粘 accessToken。
+	if provider == "trae" && accessToken != "" {
+		if uid == "" {
+			if id := auth.JWTDataString(accessToken, "id"); id != "" {
+				uid = id
+				fmt.Println("→ 已从 JWT 解析 X-Uid（data.id）:", uid)
+			}
+		}
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		if cur, _ := extra["sourceId"].(string); strings.TrimSpace(cur) == "" {
+			if sid := auth.JWTSourceID(accessToken); sid != "" {
+				extra["sourceId"] = sid
+				fmt.Println("→ 已从 JWT 解析 X-Cloudide-Session（source_id）:", sid)
+			}
+		}
+	}
 
 	if accessToken == "" {
 		fatal("凭证缺少 accessToken")
