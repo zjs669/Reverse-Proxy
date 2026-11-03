@@ -27,6 +27,8 @@ __pycache__/
 
 # ---- 本地调试脚本（含使用说明，可能被填入临时凭证，不入库）----
 deepseek.py
+deepseek_vision.py
+0.py
 sha3_wasm_bg.wasm
 
 # ---- 本地截图 ----
