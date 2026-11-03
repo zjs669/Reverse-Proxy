@@ -25,5 +25,9 @@ config.json.testbak
 __pycache__/
 *.pyc
 
+# ---- 本地调试脚本（含使用说明，可能被填入临时凭证，不入库）----
+deepseek.py
+sha3_wasm_bg.wasm
+
 # ---- 本地截图 ----
 .screenshots/
