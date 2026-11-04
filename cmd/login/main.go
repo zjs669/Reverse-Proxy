@@ -33,11 +33,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"reverse-proxy/internal/auth"
+	"reverse-proxy/internal/upstream"
 )
 
 const (
@@ -184,6 +186,50 @@ func nextKey(top map[string]json.RawMessage, prefix string) string {
 	return fmt.Sprintf("%s_%d", prefix, max+1)
 }
 
+// reuseKeyForUID 若 auth.json 里已有同一 uid 的扁平形条目，返回那个键名（覆盖原槽位），
+// 否则回落到 nextKey 算出的新键。
+//
+// 为什么必须覆盖而不是追加：池按 UID 建 entry，LoadFile 遍历的是 map（顺序随机），
+// 同 uid 两条凭证谁后 upsert 谁生效——重新登录写了 trae_2、而 trae_1 里的死令牌可能胜出，
+// 表现就是「明明重登了还是 401」（而且 account_keys 会多生一把没用的新密钥）。
+// doubao 写死单槽位 doubao_1 正是同一考虑。命中多个历史槽位时取键名最小的一条，保证确定。
+func reuseKeyForUID(path, fallback, uid string) string {
+	if strings.TrimSpace(uid) == "" {
+		return fallback
+	}
+	top, err := loadTop(path)
+	if err != nil {
+		return fallback
+	}
+	hits := make([]string, 0, 2)
+	for k, val := range top {
+		// 两种磁盘形态都要认：扁平形（login 写的）与嵌套形（网关续期后 SaveAtomic 写回的
+		// {"auth":{…},"account":{"uid":…}}）。只读扁平 uid 会漏掉续期过的账号，
+		// 于是第二次 login 又新建一个同 uid 槽位（入池时谁生效不确定）——这正是要避免的事。
+		var probe struct {
+			UID     string `json:"uid"`
+			Account struct {
+				UID string `json:"uid"`
+			} `json:"account"`
+		}
+		if json.Unmarshal(val, &probe) != nil {
+			continue
+		}
+		got := strings.TrimSpace(probe.UID)
+		if got == "" {
+			got = strings.TrimSpace(probe.Account.UID)
+		}
+		if got == uid {
+			hits = append(hits, k)
+		}
+	}
+	if len(hits) == 0 {
+		return fallback
+	}
+	sort.Strings(hits)
+	return hits[0]
+}
+
 // writeEntry 把 entry 写入 auth.json 的 key（原子替换整文件）。
 func writeEntry(path, key string, entry map[string]any) error {
 	top, err := loadTop(path)
@@ -320,19 +366,26 @@ func loginCodeBuddy(regionArg, nickname, authFile, key string) {
 
 // ─── Trae / Doubao（粘贴凭证 JSON）──────────────────────────────────────────
 
-const traeInstructions = `Trae 凭证获取方式（任选其一）：
-  1) 客户端：登录后 JWT 缓存在 %APPDATA%\Trae\ / ~/.trae\ 下，搜索 cloud_ide_jwt / access_token / x_uid
-  2) 浏览器 trae.cn 登录后 DevTools → Application → Local/Session Storage 找 token 与 uid
-  3) 抓包：请求头 Authorization: Cloud-IDE-JWT <jwt> 与 X-Uid: <uid>
-请粘贴如下 JSON（**最少只要 accessToken**，其余全部自动解析）：
+const traeInstructions = `Trae 凭证获取方式（**只需要一个长期会话标识**）：
+  首选： source_id（= JWT payload.data.source_id = 请求头 X-Cloudide-Session）
+    1) trae.cn 已登录页面 → F12 → Network → 任一请求 → Request Headers → 复制 X-Cloudide-Session 的值
+    2) 或者 F12 → Console 执行： fetch('/cloudide/api/v3/common/GetUserToken',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).then(d=>console.log(d.Result.Token))
+       拿到 JWT 后在 Console 解 payload： JSON.parse(atob(<JWT>.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))).data.source_id
+  也可以： 直接粘一枚当前有效的 Cloud-IDE-JWT（向导从里面自动解析 source_id，下次就能靠会话续期）
+
+请粘贴如下 JSON（两种任选一种）：
 {
-  "accessToken": "<Cloud-IDE-JWT>",
-  "uid": "<X-Uid，可省>",
-  "refreshToken": "<可选>",
-  "extra": { "appId":"...", "appVersion":"...", "sourceId":"..." }
+  "sourceId": "<X-Cloudide-Session 的值>"      // 只给这个：向导用它铸一枚新 JWT
 }
-说明：uid（X-Uid）、X-Cloudide-Session（data.source_id）、expiresAt（exp）
-     均由向导从 JWT 载荷自动解析，不用去 F12 里逐个翻请求头。`
+{
+  "accessToken": "<Cloud-IDE-JWT>"             // 只给这个：自动解析 exp / data.id / data.source_id
+}
+可选字段："uid"（X-Uid，一般省）、"refreshToken"（走 ExchangeToken 兜底路）、
+       "extra": { "appId":"…", "appVersion":"…" }
+
+为什么推荐 source_id：它是 Trae 的登录会话标识（长期有效），续期接口 GetUserToken 只靠它
+就能铸出新的 8h JWT；而 JWT 本身一旦过期就再也不能换（实测回 401 / code 20101 Token 无效）。
+存下它，就不需要每 8h 重粘一次令牌。`
 
 const doubaoWorkInstructions = `豆包工作（Doubao Work / 豆包桌面客户端）凭证获取方式：
   打开豆包工作客户端并登录（账号自带积分额度）→ F12 → Network → 任一 chat 请求 →
@@ -395,6 +448,24 @@ func loginPaste(provider, nickname, authFile, key, instructions string) {
 	uid = strings.TrimSpace(uid)
 	refreshToken, _ := input["refreshToken"].(string)
 	extra := normalizeExtra(input["extra"])
+	// Trae 的长期凭证是登录会话标识 source_id（= 请求头 X-Cloudide-Session）。
+	// 只给 sourceId 时也接受：拿它向 GetUserToken 铸一枚新 JWT 再入库，
+	// 用户从此不需要掐着 8h 去重粘令牌（实测：会话能铸新令牌，过期 JWT 不能）。
+	if provider == "trae" {
+		if sid, _ := input["sourceId"].(string); strings.TrimSpace(sid) != "" {
+			sid = strings.TrimSpace(sid)
+			if extra == nil {
+				extra = map[string]any{}
+			}
+			if cur, _ := extra["sourceId"].(string); strings.TrimSpace(cur) == "" {
+				extra["sourceId"] = sid
+			}
+			if accessToken == "" {
+				fmt.Println("→ 只给了 sourceId，正向 GetUserToken 铸新 Cloud-IDE-JWT …")
+				accessToken = traeMintJWT(sid)
+			}
+		}
+	}
 	// Trae：X-Cloudide-Session（data.source_id）与 X-Uid（data.id）都在 JWT 载荷里，
 	// 用户很难自己从 F12 翻出来，这里统一自动解析补齐，最少只需粘 accessToken。
 	if provider == "trae" && accessToken != "" {
@@ -446,6 +517,9 @@ func loginPaste(provider, nickname, authFile, key, instructions string) {
 		entry["extra"] = extra
 	}
 
+	// 同 uid 续期必须回到原槽位（而不是 trae_2/qoder_2）：见 reuseKeyForUID 注释。
+	key = reuseKeyForUID(authFile, key, uid)
+
 	if err := writeEntry(authFile, key, entry); err != nil {
 		fatal("write auth.json: %v", err)
 	}
@@ -453,6 +527,21 @@ func loginPaste(provider, nickname, authFile, key, instructions string) {
 	fmt.Printf("✅ 配置成功：键 %s（provider=%s nickname=%s uid=%s）\n", key, provider, nickname, uid)
 	ensureAccountKey(key, uid)
 	restartGateway()
+}
+
+// traeMintJWT 用登录会话标识（X-Cloudide-Session）铸一枚新的 Cloud-IDE-JWT。
+// 直接复用 upstream 的续期实现（与网关 token 看护同一条路径），避免协议细节两处分叉。
+func traeMintJWT(sid string) string {
+	a := &auth.Auth{Provider: "trae", Extra: map[string]string{"sourceId": sid}}
+	if err := upstream.New().RefreshToken(a); err != nil {
+		fatal("用 sourceId 换新 JWT 失败：%v\n（若会话已失效，请直接在浏览器 F12 复制 Authorization 里的 Cloud-IDE-JWT）", err)
+	}
+	jwt := strings.TrimSpace(a.AccessToken)
+	if jwt == "" {
+		fatal("上游没返回令牌（sourceId 可能被用错了头名：它应当是 X-Cloudide-Session，不是 X-Cloudide-Token）")
+	}
+	fmt.Println("→ 已用登录会话（source_id）铸出新 Cloud-IDE-JWT，exp/uid/sourceId 接下来自动解析")
+	return jwt
 }
 
 // ─── Qoder（PAT 兑换 或 dt-/drt- 直接填）────────────────────────────────────
@@ -549,6 +638,9 @@ func loginQoder(nickname, authFile, key string) {
 	}
 	entry["expiresAt"] = expiresAt
 	entry["extra"] = extra
+
+	// 同 uid 续期回到原槽位（避免 qoder_1/qoder_2 同 uid 双写，见 reuseKeyForUID）。
+	key = reuseKeyForUID(authFile, key, uid)
 
 	if err := writeEntry(authFile, key, entry); err != nil {
 		fatal("write auth.json: %v", err)
@@ -705,26 +797,11 @@ func readPastedJSON() (map[string]any, error) {
 }
 
 // jwtExp 不验证签名，仅读 payload.exp（Cloud-IDE-JWT 为 3 段 base64url）。
+// 实现统一交给 auth.JWTExp：本函数旧版本先补 '=' 再用 RawURLEncoding 解码，
+// 载荷长度不是 4 的倍数时必然 illegal base64 data → 返回 0 → 写入 farFuture 占位值，
+// 8h 短寿命账号因此双双失明（NeedsRefresh 永假、看护从不续期也不告警）。
 func jwtExp(token string) int64 {
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
-		return 0
-	}
-	s := parts[1]
-	for len(s)%4 != 0 {
-		s += "="
-	}
-	b, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil {
-		return 0
-	}
-	var p struct {
-		Exp int64 `json:"exp"`
-	}
-	if err := json.Unmarshal(b, &p); err != nil {
-		return 0
-	}
-	return p.Exp
+	return auth.JWTExp(token)
 }
 
 // ─── Qoder PAT 兑换 / userinfo ──────────────────────────────────────────────

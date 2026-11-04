@@ -78,6 +78,17 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur) // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
+	// cooldown.disabled=true：关闭网关侧全部频率限制与风控——后续错误不再施加
+	// 冷却/熔断/禁用（pool 入口空操作），并抹平 state.json 继承来的历史惩罚，
+	// 使本地任何账号立即可用（账号级密钥不会因上一轮的 429 被挡在门外）。
+	if cfg.Cooldown.Disabled {
+		p.SetPenaltyDisabled(true)
+		if n := p.ClearPenalties(); n > 0 {
+			log.Printf("限流冷却已禁用（cooldown.disabled=true）：抹平 %d 个账号的历史冷却/禁用状态", n)
+		} else {
+			log.Printf("限流冷却已禁用（cooldown.disabled=true）：不冷却/不禁用任何账号")
+		}
+	}
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -247,9 +258,25 @@ var knownProviders = []string{"codebuddy", "trae", "qoder", "doubao", "deepseek"
 func logAccountHealth(auths []*auth.Auth) {
 	now := time.Now()
 	present := make(map[string]bool, len(knownProviders))
+	seen := make(map[string]string, len(auths)) // uid → 首个占有它的槽位标签
 	for _, a := range auths {
 		p := a.ProviderOrDefault()
 		present[p] = true
+		// 同 uid 出现两份凭证（典型成因：旧版 login 续期时写了 trae_2 而不是覆盖 trae_1）：
+		// 池按 UID 建 entry，而 LoadFile 遍历 map 顺序随机，最终哪枚令牌生效不确定——
+		// 表现就是“明明重登了还是 401”，必须启动就暴露而不是让人去猜随机数。
+		if a.UID != "" {
+			slot := a.FileKey
+			if slot == "" {
+				slot = a.Nickname
+			}
+			if prev, dup := seen[a.UID]; dup {
+				log.Printf("WARN: [auth] uid=%s 在 %s 与 %s 各有一份凭证，入池时后者覆盖前者（顺序随机）：请删掉过期那条",
+					logfmt.UID8(a.UID), prev, slot)
+			} else {
+				seen[a.UID] = slot
+			}
+		}
 		if a.ExpiresAt <= 0 {
 			continue // 无过期信息（部分手填凭证），不做判断
 		}
@@ -264,9 +291,10 @@ func logAccountHealth(auths []*auth.Auth) {
 			suffix := ""
 			switch {
 			case p == "trae":
-				// trae 可以不靠 refreshToken 自助续期（X-Cloudide-Token 换新 JWT），
-				// 但那个接口只接受**未过期**的 JWT，所以过了 exp 就真的只能重新登录。
-				suffix = "，已错过自助续期窗口（续期接口只接受未过期的 JWT），需人工重新登录"
+				// GetUserToken 认 X-Cloudide-Session（= JWT 里的 data.source_id，登录会话，长期有效），
+				// 所以 JWT 过期后依然能自愈，token 看护会自动换新；只有连会话凭证也失效
+				// （在别处登出、或 auth.json 里没有 sourceId）才真需要人工重登。
+				suffix = "，但 Trae 可用登录会话（X-Cloudide-Session）自愈，token 看护会自动换新令牌"
 			case a.RefreshToken == "":
 				suffix = "，且无 refreshToken（不能自动刷新）"
 			}

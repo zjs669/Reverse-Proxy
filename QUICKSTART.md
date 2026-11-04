@@ -41,8 +41,8 @@ docker compose up -d --build
 
 参数形态分两种，别混：
 
-- **codebuddy**：`login codebuddy <cn|intl> <昵称>`（有区域维度）
-- **trae / qoder / doubao**：`login <供应商> <昵称>`（**没有**区域参数，多写一个词会被当成昵称）
+- **codebuddy**：`login codebuddy <cn|intl> <昵称>`（有区域维度；命令会**打印授权链接**，浏览器登录后自动轮询）
+- **trae / qoder / doubao / deepseek**：`login <供应商> <昵称>`（**没有**区域参数，多写一个词会被当成昵称）
 
 `<昵称>` 是账号显示名，随便取，只用于日志和 `auth.json` 的键名。
 
@@ -51,11 +51,11 @@ docker compose up -d --build
 docker exec -it reverse-proxy /app/login codebuddy cn 我的主号      # 国内版
 docker exec -it reverse-proxy /app/login codebuddy intl 我的国际版  # 国际版 → 键名 codebuddyai_1
 
-# 这三家是「粘贴凭证」型：先看它打印的取凭证指引，再从 stdin 粘入 JSON
-docker exec -it reverse-proxy /app/login trae 我的trae
-docker exec -it reverse-proxy /app/login qoder 我的qoder
-docker exec -it reverse-proxy /app/login doubao 我的豆包
-docker exec -it reverse-proxy /app/login deepseek 我的DeepSeek
+# 这四家是「粘贴凭证」型：先看它打印的取凭证指引，再从 stdin 粘入 JSON
+docker exec -it reverse-proxy /app/login trae 我的trae          # 只需 {"sourceId":"…"}（X-Cloudide-Session）
+docker exec -it reverse-proxy /app/login qoder 我的qoder        # 只需 {"pat":"pt-…"}
+docker exec -it reverse-proxy /app/login doubao 我的豆包        # 只需 {"sessionid":"…"}
+docker exec -it reverse-proxy /app/login deepseek 我的DeepSeek  # 只需 {"accessToken":"mb5+…"}
 ```
 
 > ⚠️ 容器没起来（重启循环）时 `docker exec` 进不去，用一次性容器挂载同款卷来登录：
@@ -73,8 +73,11 @@ docker exec -it reverse-proxy /app/login deepseek 我的DeepSeek
 ### 各家最少凭证 JSON（存成 cred.json 后按上面重定向粘入）
 
 ```jsonc
-// Trae —— 必填 accessToken + uid
-{ "accessToken": "<Cloud-IDE-JWT 原文>", "uid": "<X-Uid>" }
+// Trae —— 只给登录会话标识（= 请求头 X-Cloudide-Session，长期有效）
+// 向导会拿它向 GetUserToken 铸一枚新 JWT 入库；8h 的 JWT 不再需要人工重粘。
+{ "sourceId": "<X-Cloudide-Session 的值>" }
+// 也可以粘 JWT（自动解析 exp / data.id / data.source_id）：
+{ "accessToken": "<Cloud-IDE-JWT 原文>" }
 
 // Qoder —— 最简：只给 PAT（自动兑换 jobToken + 生成机器指纹 + 兜底 uid）
 { "pat": "pt-…" }
@@ -83,9 +86,14 @@ docker exec -it reverse-proxy /app/login deepseek 我的DeepSeek
 
 // 豆包 —— 最少只给 sessionid（F12 整段 Cookie 直接粘也可以）
 { "sessionid": "…" }
+
+// DeepSeek —— 最少只给 accessToken（即 localStorage 的 userToken.value）
+{ "accessToken": "mb5+…" }
 ```
 
-> CodeBuddy 不用粘 JSON：跑命令后按提示浏览器登录即可。
+> CodeBuddy / WorkBuddy 不用粘 JSON：跑 `login codebuddy <cn|intl> <昵称>` 后它会**打印一条授权链接**
+> （国内发起自 `https://copilot.tencent.com`、落地 `www.codebuddy.cn`；国际版两端都是 `www.codebuddy.ai`），
+> 浏览器完成登录后命令自动轮询取 token。
 
 ## 重启加载账号
 ```sh

@@ -29,6 +29,11 @@ type Pool struct {
 	idleWeightMax     float64
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
+	// penaltyDisabled 关闭全部账号级惩罚：true 时冷却/熔断/禁用入口（Cooldown、
+	// CooldownSoftForModel、Disable、NoteSessionDead、NoteError 的熔断喂入）一律空操作，
+	// 账号永远留在可选池里。语义来自 config 的 cooldown.disabled：本地单实例/调试场景
+	// 不希望网关替上游做风控，宁可直接拿到上游的 429/402/12153 原始错误。
+	penaltyDisabled bool
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -100,6 +105,14 @@ func (p *Pool) SetMaxInFlight(n int) {
 	if n >= 0 {
 		p.maxInFlight = n
 	}
+}
+
+// SetPenaltyDisabled 注入「关闭全部账号级惩罚」开关（main 从 cooldown.disabled 解析后调用）。
+// true 只让后续的错误不再施加惩罚；state.json 里继承来的历史冷却/禁用需另行 ClearPenalties。
+func (p *Pool) SetPenaltyDisabled(disabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.penaltyDisabled = disabled
 }
 
 // SetStore 注入池状态快照镜像（redisstore.Store）。nil 表示不镜像（纯本地恢复）。

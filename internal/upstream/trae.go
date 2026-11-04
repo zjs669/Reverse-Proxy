@@ -7,8 +7,12 @@
 //     function 也必须是 chat_v3（agent_chat/chat/fusion_chat 均为空）。
 //     返回 config_info_list[]：config_name + display_config.display_name + model_detail_list[].model_name
 //   令牌刷新：POST https://api.trae.cn/cloudide/api/v3/common/GetUserToken（已实机验证）
-//     头必须用 X-Cloudide-Token: <当前JWT> + X-Uid（放 Authorization: Cloud-IDE-JWT 会 401 Token 无效）
-//     响应 Result.Token / Result.ExpiredAt，无需 refreshToken；JWT 寿命约 8h，到期前换新可无限续
+//     认两种凭证任一：X-Cloudide-Token: <当前 JWT>、或 X-Cloudide-Session: <source_id>。
+//     关键发现（2026-11-04 实测）：source_id（= JWT payload.data.source_id）是**登录会话标识**，
+//     长期有效且同一会话多枚 JWT 里它不变；拿它调本接口，**即使 JWT 已过期也能换到新令牌**。
+//     只有 X-Uid 会被拒（401/20101），把 source_id 塞进 X-Cloudide-Token 也一样被拒（头名不能错）。
+//     所以 Trae 不存在「必须每 8h 人工重登」——浏览器多日不打开也免验证，用的就是同一个会话凭证。
+//     响应 Result.Token / Result.ExpiredAt，无需 refreshToken；JWT 寿命约 8h，到期前换新可无限续。
 //   旧路径（未验证，仅作兜底）：https://api.trae.cn/cloudide/api/v3/trae/oauth/ExchangeToken
 //
 // 凭证来源（auth JSON）：
@@ -168,10 +172,11 @@ func (p *traeProvider) resolveModel(clientModel string) (string, string) {
 	return clientModel, clientModel + "__dev"
 }
 
-// RefreshToken 用当前 Cloud-IDE-JWT 换一枚新的 Cloud-IDE-JWT。
+// RefreshToken 换一枚新的 Cloud-IDE-JWT。
 //
-// 主路径 GetUserToken：凭证里只要有 accessToken（JWT 本身未过期或刚过期）即可自助续期，
-// 不需要 refreshToken；这是网页/客户端加载时走的同一接口，JWT 约 8h 一轮，续期成功即无限可用。
+// 主路径 GetUserToken：不需要 refreshToken，也不需要手上有一枚有效的 JWT——
+// 只要带上登录会话标识 X-Cloudide-Session（data.source_id，长期有效）就能换新。
+// 这是“浏览器好几天不用也免验证”的同一个道理，所以 Trae 账号可以完全自动养护。
 // 兜底路径 ExchangeToken：仅在配了 refreshToken 时尝试（协议细节未经实机验证）。
 func (p *traeProvider) RefreshToken(c *Client, a *auth.Auth) error {
 	a.Lock()
@@ -225,16 +230,46 @@ func (p *traeProvider) RefreshToken(c *Client, a *auth.Auth) error {
 	a.AccessToken = jwt
 	if out.ExpiresIn > 0 {
 		a.ExpiresAt = time.Now().Add(time.Duration(out.ExpiresIn) * time.Second).Unix()
+	} else if exp := auth.JWTExp(jwt); exp > 0 {
+		// 无 expires_in 时按新 JWT 的 exp 定寿命（与 refreshViaGetUserToken 同一兜底口径）。
+		a.ExpiresAt = exp
 	}
 	return nil
 }
 
+// resolveSourceID 取登录会话标识（X-Cloudide-Session）：extra.sourceId（显式覆盖）→ 当前 JWT 的 data.source_id。
+// 实测同一登录会话铸出的多枚 JWT 里 source_id 相同（不随 8h 轮换而变），
+// 所以它既是聊天请求头，也是 JWT 过期后唯一能自救的长期凭证。
+func (p *traeProvider) resolveSourceID(a *auth.Auth) string {
+	if sid := strings.TrimSpace(a.ExtraVal("sourceId")); sid != "" {
+		return sid
+	}
+	return auth.JWTSourceID(a.AccessToken)
+}
+
+// applyRefreshHeaders 设置 GetUserToken 的鉴权头：登录会话（X-Cloudide-Session）必带，
+// 手上那枚 JWT（哪怕已过期）作为补充一并带上。头名不能弄错：source_id 放 X-Cloudide-Token
+// 会被判 401/20101，只给 X-Uid 同样被拒。accessToken 为空时不设令牌头（靠会话换新）。
+func (p *traeProvider) applyRefreshHeaders(req *http.Request, a *auth.Auth, sid string) {
+	if jwt := strings.TrimSpace(a.AccessToken); jwt != "" {
+		req.Header.Set("X-Cloudide-Token", jwt)
+	}
+	if sid != "" {
+		req.Header.Set("X-Cloudide-Session", sid)
+	}
+	if uid := strings.TrimSpace(a.UID); uid != "" {
+		req.Header.Set("X-Uid", uid)
+	}
+}
+
 // refreshViaGetUserToken 调 GetUserToken 换新 JWT。头是实机验证的关键点：
-// 必须 X-Cloudide-Token（同值放 Authorization 会被 401 拒绝），X-Uid 用于定位账号。
+// 未过期时用 X-Cloudide-Token；**令牌已过期时靠 X-Cloudide-Session（登录会话，长期有效）照样能换**。
+// 两个都带最稳（会话优先，令牌作为补充）；只有 X-Uid 会被上游判 401/20101 Token 无效。
 func (p *traeProvider) refreshViaGetUserToken(c *Client, a *auth.Auth) error {
 	jwt := strings.TrimSpace(a.AccessToken)
-	if jwt == "" {
-		return fmt.Errorf("trae refresh: empty accessToken")
+	sid := p.resolveSourceID(a)
+	if jwt == "" && sid == "" {
+		return fmt.Errorf("trae refresh: 既无 accessToken 也无 source_id，无法换新令牌")
 	}
 	url := traeRefreshBase + "/cloudide/api/v3/common/GetUserToken"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
@@ -243,10 +278,7 @@ func (p *traeProvider) refreshViaGetUserToken(c *Client, a *auth.Auth) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Cloudide-Token", jwt)
-	if uid := strings.TrimSpace(a.UID); uid != "" {
-		req.Header.Set("X-Uid", uid)
-	}
+	p.applyRefreshHeaders(req, a, sid)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return err
@@ -278,6 +310,11 @@ func (p *traeProvider) refreshViaGetUserToken(c *Client, a *auth.Auth) error {
 	a.AccessToken = out.Result.Token
 	if t, err := time.Parse(time.RFC3339, out.Result.ExpiredAt); err == nil {
 		a.ExpiresAt = t.Unix()
+	} else if exp := auth.JWTExp(out.Result.Token); exp > 0 {
+		// ExpiredAt 缺失/改格式不能把新令牌的寿命丢掉：改从新 JWT 的 exp 取。
+		// 否则 ExpiresAt 还留着上一次的旧值（甚至是 farFuture 占位值），看护按它判定
+		// “还剩很久”，新令牌再也不会被续期，8h 后账号又一次静默死亡。
+		a.ExpiresAt = exp
 	}
 	log.Printf("[trae] refresh ok uid=%s expired=%s", logUID(a.UID), out.Result.ExpiredAt)
 	return nil
@@ -456,11 +493,7 @@ func (p *traeProvider) applyChatHeaders(req *http.Request, a *auth.Auth, modelNa
 	// X-Cloudide-Session：JWT payload.data.source_id（用户登录会话标识），
 	// 缺失时部分上游接口会拒绝或限流，故始终携带。
 	// 取值优先级：extra.sourceId（用户显式覆盖）→ 从当前 JWT 自动解析。
-	// 后者是主路径：token 看护换新 JWT 后 source_id 可能变，存死会带旧会话打上游。
-	sid := strings.TrimSpace(a.ExtraVal("sourceId"))
-	if sid == "" {
-		sid = auth.JWTSourceID(a.AccessToken)
-	}
+	sid := p.resolveSourceID(a)
 	if sid != "" {
 		req.Header.Set("X-Cloudide-Session", sid)
 	}

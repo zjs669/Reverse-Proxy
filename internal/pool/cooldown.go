@@ -27,6 +27,9 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.penaltyDisabled {
+		return // 关闭惩罚：429/404/余额耗尽一律不冷却（CooldownUntilTomorrow4AM 同走本入口）
+	}
 	if e, ok := p.byUID[uid]; ok {
 		if kind == CoolSoft {
 			e.softStreak++
@@ -62,6 +65,9 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.penaltyDisabled {
+		return // 关闭惩罚：模型级 6004 同样不冷却
+	}
 	if e, ok := p.byUID[uid]; ok {
 		e.softStreak++
 		hasReset := !resetAt.IsZero()

@@ -64,8 +64,10 @@ type Config struct {
 		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。
 		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
-		// Disabled 关闭限流冷却：true 时 429/404 不再自动冷却账号
-		// （仅余额耗尽、session 死亡仍按原逻辑）。与 pool.breaker_threshold=0 配合可彻底关闭限流。
+		// Disabled 关闭网关侧全部频率限制与风控：true 时任何错误都不罚账号
+		// （429/404 冷却、余额耗尽硬冷却、12153 禁用、5xx 熔断计数全部跳过），
+		// 并在启动时抹平 state.json 里的历史冷却/禁用。配合 pool.breaker_threshold=0、
+		// pool.max_in_flight=0 可彻底做到本地不限流、不降并发。默认 false（保持既有调度）。
 		Disabled bool `json:"disabled"`
 	} `json:"cooldown"`
 
@@ -149,7 +151,7 @@ type Config struct {
 
 	Pool struct {
 		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3；0 = 关闭熔断
 		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
 		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重

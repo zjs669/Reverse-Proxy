@@ -2,9 +2,12 @@
 //
 // 为什么需要它：不同 provider 的凭证寿命差得很远——trae 的 Cloud-IDE-JWT 只有 8h，
 // 而 keepalive_hours 默认只在 22 点刷一次。8h < 24h，意味着每天有 16 小时令牌是死的。
-// 更麻烦的是 trae 的续期接口（GetUserToken）要求传入的 JWT **尚未过期**：实测过期
-// 12.5h 后带着旧 token 调它返回 401 / 20101「Token 无效」，也就是说一旦错过窗口，
-// 就只能人工重新登录。
+//
+// 历史误判（2026-11-04 推翻）：曾认为「GetUserToken 只接受未过期的 JWT，错过窗口只能人工重登」，
+// 实测不成立——该接口认 X-Cloudide-Session（= JWT payload.data.source_id，登录会话标识，
+// 长期有效），过期令牌照样能换新的（见 trae.go refreshViaGetUserToken 注释）。
+// 所以本看护对 trae 是「无限自动养护」，而不是「错过就死」。真正的杀手是凭证字段写错
+// （旧版 login 把 expiresAt 写成 2100，看护永远判定“还剩几十年”而跳过）。
 //
 // 所以这里做的是「**提前**续期」：按固定间隔（token_watch_interval，默认 10m）巡检，
 // 剩余有效期一旦进入窗口（refresh_window，默认 30m；trae 覆盖为 2h）就立刻换新。
@@ -23,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"reverse-proxy/internal/auth"
@@ -99,8 +103,8 @@ func (s *Scheduler) RunTokenWatchNow() {
 			continue
 		}
 		prov := a.ProviderOrDefault()
-		// 没有 refreshToken 的账号里只有 trae 能自助续期（X-Cloudide-Token 换新 JWT，
-		// 见 trae.go refreshViaGetUserToken）；其余家没有 refreshToken 就无从刷新。
+		// 没有 refreshToken 的账号里只有 trae 能自助续期（GetUserToken 带 X-Cloudide-Session
+		// 换新 JWT，不需要 refreshToken）；deepseek 走存活校验；其余家没 refreshToken 就无从刷新。
 		if a.RefreshToken == "" && prov != "trae" && prov != "deepseek" {
 			continue
 		}
@@ -117,10 +121,14 @@ func (s *Scheduler) RunTokenWatchNow() {
 			}
 		}
 		remaining := time.Duration(a.ExpiresAt-now.Unix()) * time.Second
-		// 同一枚**已过期**令牌不再重试：续期接口只接受未过期的 JWT，过期后重试必然 401，
-		// 只会每 20 分钟给上游送一次无效请求。等用户重新登录换了令牌（指纹变化）再试。
+		// 已过期的令牌能不能自救，分两家看：
+		//   - 有 refreshToken 的：能（拿 refresh 换新）；
+		//   - trae 且拿得到登录会话 source_id：也能（GetUserToken 认 X-Cloudide-Session，
+		//     不要求手上另有有效 JWT，见 trae.go）；
+		//   - 其余：不能，重试必然 401，记下指纹后跳过，等用户重登换了令牌再试。
+		selfHealable := a.RefreshToken != "" || (prov == "trae" && traeSessionID(a) != "")
 		fp := tokenFingerprint(a.AccessToken)
-		if a.ExpiresAt > 0 && remaining <= 0 && s.tokenKnownDead(st.UID, fp) {
+		if a.ExpiresAt > 0 && remaining <= 0 && !selfHealable && s.tokenKnownDead(st.UID, fp) {
 			continue
 		}
 		// ExpiresAt 未知（0/负数）时无法判断寿命，直接当成「需要续期」处理一次；
@@ -134,12 +142,11 @@ func (s *Scheduler) RunTokenWatchNow() {
 		s.markTokenTried(st.UID, now)
 
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
-			// 已过期 → 记下这枚令牌的指纹，后续巡检直接跳过（见上方 tokenKnownDead），
-			// 直到用户重新登录换了令牌才再次尝试。
-			if a.ExpiresAt > 0 && remaining <= 0 {
+			// 判死只对「无法自救」的家生效：trae 靠登录会话还能换，记成死号就再也不会重试了。
+			if a.ExpiresAt > 0 && remaining <= 0 && !selfHealable {
 				s.markTokenDead(st.UID, fp)
 			}
-			s.reportTokenFailure(a, prov, remaining, err)
+			s.reportTokenFailure(a, prov, remaining, selfHealable, err)
 			continue
 		}
 		s.clearTokenDead(st.UID)
@@ -193,6 +200,15 @@ func (s *Scheduler) clearTokenDead(uid string) {
 	delete(s.tokenDead, uid)
 }
 
+// traeSessionID 取 trae 账号的登录会话标识（与 upstream 里 resolveSourceID 同口径：
+// extra.sourceId 优先，否则从当前 JWT 载荷解）。看护靠它判定「过期令牌能否自愈」。
+func traeSessionID(a *auth.Auth) string {
+	if sid := strings.TrimSpace(a.ExtraVal("sourceId")); sid != "" {
+		return sid
+	}
+	return auth.JWTSourceID(a.AccessToken)
+}
+
 // tokenFingerprint 令牌指纹：长度 + 尾部若干字符即可区分「换没换过令牌」，
 // 不用哈希也就没有把完整令牌写进日志/内存键的风险。
 func tokenFingerprint(tok string) string {
@@ -205,13 +221,20 @@ func tokenFingerprint(tok string) string {
 // reportTokenFailure 分类打印续期失败原因。重点是区分「还能自救」与「已经只能人工」：
 // 前者只是本次没换到（网络抖动/上游 5xx，退避后自动重试），后者必须给人一条可复制的
 // 重新登录命令——否则日志里只有一句 401，没人知道该怎么修。
-func (s *Scheduler) reportTokenFailure(a *auth.Auth, prov string, remaining time.Duration, err error) {
+// selfHealable = 该账号过期后还能不能靠自己手上的长期凭证换新（见 RunTokenWatchNow 里的判定）。
+func (s *Scheduler) reportTokenFailure(a *auth.Auth, prov string, remaining time.Duration, selfHealable bool, err error) {
 	var ue *upstream.Error
 	isDead := errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead
 
-	// token 已过期：GetUserToken 只认未过期的 JWT，此时无法自助续期，只能重新登录。
+	// token 已过期：能自救的家（如 trae 带登录会话）只是本次没换到，下轮接着试；
+	// 不能自救的家才是真死，只能重新登录。
 	if a.ExpiresAt > 0 && remaining <= 0 {
-		log.Printf("WARN: token-watch %s: %s token 已过期 %s，无法自助续期（GetUserToken 只接受未过期的 JWT）"+
+		if selfHealable {
+			log.Printf("WARN: token-watch %s: %s token 已过期 %s，仍可用长期凭证自愈（本次未换成功，%s 后重试）：%v",
+				logfmt.UID8(a.UID), prov, shortDur(-remaining), tokenRetryBackoff, err)
+			return
+		}
+		log.Printf("WARN: token-watch %s: %s token 已过期 %s，且无 refreshToken/会话凭证可自救"+
 			" → 需重新登录：docker exec -i reverse-proxy /app/login %s <名> < cred.json",
 			logfmt.UID8(a.UID), prov, shortDur(-remaining), prov)
 		return

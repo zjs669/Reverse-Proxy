@@ -13,11 +13,44 @@ import (
 func (p *Pool) Disable(uid, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.penaltyDisabled {
+		return // 关闭惩罚（cooldown.disabled=true）：禁用入口空操作
+	}
 	if e, ok := p.byUID[uid]; ok {
 		e.disabled = true
 		e.reason = reason
 		p.dirty.Store(true)
 	}
+}
+
+// ClearPenalties 抹平全历史惩罚（冷却 / 熔断 / 禁用 / 各域计数器），返回被清理的账号数。
+// 供启动时在 cooldown.disabled=true 下一次性清除 state.json 继承来的 until/disabled——
+// 否则“关惩罚”只对新错误生效，历史冷却仍会把账号挡在选号之外（pinned key 会直接 503）。
+// 只动惩罚域字段，credits/successCount/errTotal/lastSuccess/lastErr 等观测值原样保留。
+func (p *Pool) ClearPenalties() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, e := range p.byUID {
+		if e.disabled || !e.until.IsZero() || !e.breakerUntil.IsZero() ||
+			e.fails != 0 || e.retryCount != 0 || e.softStreak != 0 || e.sessionDeadFails != 0 {
+			n++
+		}
+		e.disabled = false
+		e.reason = ""
+		e.until = time.Time{}
+		e.coolKind = 0
+		e.softStreak = 0
+		e.softRateModel = ""
+		e.breakerUntil = time.Time{}
+		e.fails = 0
+		e.retryCount = 0
+		e.sessionDeadFails = 0
+	}
+	if n > 0 {
+		p.dirty.Store(true)
+	}
+	return n
 }
 
 // NoteSessionDead 记录一次 ErrSessionDead（12153）——**不立即禁用**。
@@ -32,6 +65,9 @@ func (p *Pool) Disable(uid, reason string) {
 func (p *Pool) NoteSessionDead(uid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.penaltyDisabled {
+		return false // 关闭惩罚：12153 不再累计、不再杀号
+	}
 	e, ok := p.byUID[uid]
 	if !ok {
 		return false
@@ -99,7 +135,10 @@ func (p *Pool) NoteError(uid string) {
 	if e, ok := p.byUID[uid]; ok {
 		e.errTotal++
 		e.lastErr = time.Now()
-		p.recordBreakerFailureLocked(e)
+		// 关闭惩罚时只记观测值（err_total/last_err），不喂熔断。
+		if !p.penaltyDisabled {
+			p.recordBreakerFailureLocked(e)
+		}
 		p.dirty.Store(true)
 	}
 }

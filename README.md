@@ -126,11 +126,14 @@ Reverse-Proxy listening on :7863 (api_key=false, account_keys=0, provider_keys=0
 ### 3. 登录上游账号
 
 ```bash
-# CodeBuddy：自动 OAuth（打印 URL → 浏览器登录 → 回车轮询拿 token）
+# CodeBuddy：自动 OAuth（打印授权 URL → 浏览器登录 → 回车轮询拿 token）
 docker exec -it reverse-proxy /app/login codebuddy cn 我的主号
 
-# Trae / Qoder / 豆包工作：按提示粘贴凭证 JSON（Windows 用文件重定向，见下）
-docker exec -i reverse-proxy /app/login trae 我的trae < trae.json
+# Trae：只需一个长期会话标识（向导拿它铸 JWT）
+echo '{"sourceId":"<X-Cloudide-Session>"}' | docker exec -i reverse-proxy /app/login trae 我的trae
+
+# Qoder / 豆包工作 / DeepSeek：按提示粘凭证 JSON（Windows 用文件重定向，见下）
+docker exec -i reverse-proxy /app/login qoder 我的qoder < qoder.json
 docker exec -i reverse-proxy /app/login doubao 我的豆包 < doubao.json
 ```
 
@@ -193,7 +196,8 @@ curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <密钥>"
   "session_sticky":  { "enabled": true, "ttl": "30m", "gc_interval": "5m" },
   "deepseek":        { "session_ttl": "24h",              // 上游会话坐标有效期（上游 3 天到期）
                        "session_file": "./data/deepseek_sessions.json" },
-  "cooldown":        { "soft_rate": "600s", "soft_rate_max": "2h", "disabled": false },
+  "cooldown":        { "soft_rate": "600s", "soft_rate_max": "2h",
+                       "disabled": false },  // ★ true = 关掉网关侧全部限流/风控（见「账号池调度」）
   "upstream":        { "timeout_seconds": 120 },
   "server":          { "max_body_mb": 8 }
 }
@@ -249,36 +253,43 @@ curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <密钥>"
 
 ```bash
 docker exec -i reverse-proxy /app/login doubao 我的豆包 < cred.json
+# Trae 只给长期会话（铸 JWT 由向导完成）：
+echo '{"sourceId":"<X-Cloudide-Session 的值>"}' | docker exec -i reverse-proxy /app/login trae 我的trae
 ```
 
 ### 各家凭证怎么取
 
-| 供应商 | 要什么 | 去哪拿 | 有效期 |
+| 供应商 | 最少要什么 | 去哪拿 | 长期凭证的寿命 |
 |---|---|---|---|
-| CodeBuddy | OAuth（自动） | 命令打印 URL → 浏览器登录 → 自动轮询 | 较长 |
-| Trae | `Cloud-IDE-JWT` | trae.cn 登录 → F12 → Network → 请求头 `Authorization: Cloud-IDE-JWT <一串>` | **8 小时** |
-| Qoder | `dt-…` / `drt-…` token | qoder 登录后 F12 抓请求头，或用 `scripts/qoder_bootstrap.py` 引导 | 30 天 |
-| 豆包工作 | 账号 Cookie（`sessionid` / `ttwid` / `passport_csrf_token`） | 豆包工作客户端登录 → F12 → Network → 任一 chat 请求 → 请求头 `Cookie:` 整段 | ~30 天 |
-| DeepSeek | `userToken`（`mb5+…`） | chat.deepseek.com 登录 → F12 → Application → Local Storage → `userToken` 的 `value` 字段（或 Network 里 `Authorization: Bearer` 后那串） | 长期，失效需重登 |
+| CodeBuddy / WorkBuddy | **什么都不用粘**：命令打印一条**授权链接**，浏览器登录后自动轮询取 token | `login codebuddy cn\|intl <昵称>` 输出的 `authUrl`（国内 `https://copilot.tencent.com` 发起、落地 `www.codebuddy.cn`；国际版发起与落地都是 `www.codebuddy.ai`） | 较长，且有 refreshToken 自动续 |
+| Trae | `sourceId`（= 请求头 `X-Cloudide-Session`）；或一枚有效 `Cloud-IDE-JWT` | trae.cn 已登录页 → F12 → Network → 任一请求的 Request Headers → 复制 `X-Cloudide-Session` | **source_id 长期有效**；8h 的 JWT 由网关自己铸 |
+| Qoder | `pat`（`pt-…`） | qoder.com.cn/account/integrations 建 Personal Access Token | 长期 |
+| 豆包工作 | `sessionid` | 豆包工作客户端 → F12 → Network → 任一 chat 请求 → `Cookie:` 里的 `sessionid` | ~30 天 |
+| DeepSeek | `accessToken`（`mb5+…`，即 localStorage 的 `userToken.value`） | chat.deepseek.com → F12 → Application → Local Storage → `userToken` | 长期，上游无 refresh |
 
-凭证文件格式（`cred.json`）—— **每家最少只需这些字段**（省略的字段自动补全：uid 兜底随机/缺省值、机器指纹自动生成、expiresAt 自动解析）：
+凭证文件格式（`cred.json`）—— **每家最少只需一个字段**（其余自动补全：uid 从令牌载荷解/兜底、机器指纹自动生成、`expiresAt` 自动解析）：
 
 ```jsonc
-// Trae —— 最少只给 accessToken（X-Uid ← data.id、X-Cloudide-Session ← data.source_id、expiresAt ← exp 全自动解析）
+// Trae —— 只给登录会话标识，向导拿它向 GetUserToken 铸一枚新 JWT 再入库（推荐）
+{ "sourceId": "<X-Cloudide-Session 的值>" }
+// 也可以粘 JWT（向导会从里面解出 exp / data.id / data.source_id）：
 { "accessToken": "<Cloud-IDE-JWT 原文>" }
 
-// Qoder —— 最简：只给 PAT（login 自动兑换 jobToken + 生成机器指纹 + 兜底 uid）
+// Qoder —— 只给 PAT（login 自动兑换 jobToken + 生成机器指纹 + 兜底 uid）
 { "pat": "pt-…" }
 // 或已有设备流令牌（uid 也可省）：
 { "accessToken": "dt-…", "refreshToken": "drt-…" }
 
-// 豆包 —— 最少只给 sessionid（ttwid / passport_csrf_token 可选增强）
+// 豆包 —— 只给 sessionid（ttwid / passport_csrf_token 可选增强；F12 整段 Cookie 直接粘也认）
 { "sessionid": "…" }
 
-// DeepSeek —— 最少只给 accessToken（device_id / Cookie 可选）
+// DeepSeek —— 只给 accessToken（device_id / Cookie 可选）
 { "accessToken": "mb5+…" }
-// 也可直接粘 localStorage 原文，脚本会自动取 value：
+// 也可直接粘 localStorage 原文，向导会自动取 value：
 { "userToken": { "value": "mb5+…", "__version": "0" } }
+
+// CodeBuddy / WorkBuddy —— 没有 cred.json：跑 `login codebuddy cn|intl <昵称>`，
+// 命令会打印授权链接（并尝试复制进剪贴板），浏览器完成登录后它自动轮询取 token。
 ```
 
 ### Windows 上粘不进去 / 卡住？
@@ -299,7 +310,8 @@ type cred.json | docker exec -i reverse-proxy /app/login doubao 我的豆包
 ### 续期
 
 - **能自助续期**：CodeBuddy、Trae、Qoder → 交给 token 看护自动完成，基本无需管。
-  - 例外：Trae 的续期接口**只接受未过期的 JWT**，一旦过期就只能重新登录（见 FAQ）。
+  - Trae 只需一次性粘 `sourceId`（登录会话，长期有效）；之后 8h 的 JWT 全由网关铸（见 FAQ：
+    只拿 JWT 自身续是错觉，未过期只回显、过期就 401）。
 - **不能自助续期**：豆包 Cookie → 约每 30 天重跑一次 `login doubao`；DeepSeek `userToken` → 上游**没有 refresh 接口**（收到 `40003` 只能重登），网关做存活校验并禁用失效号，日志会提示重跑 `login deepseek`。
 
 ---
@@ -458,6 +470,20 @@ Only CodeBuddy / Trae / Qoder 会把 `tool_calls` 原样回给你；豆包 / Dee
 - **软冷却**：限流触发指数退避（`600s` → 封顶 `2h`），到期自动恢复。
 - **会话粘性**：同一会话在 TTL 内尽量复用同一账号（`session_sticky`）。
 
+**彻底关掉限流与风控**（本地单实例/调试推荐）：
+
+```jsonc
+"cooldown": { "disabled": true },      // 任何错误都不罚账号：429/404 冷却、余额硬冷却、
+                                        //   12153 禁用、5xx 熔断计数全部跳过，
+                                        //   并在启动时抹平 state.json 里的历史冷却/禁用
+"pool":     { "breaker_threshold": 0,  // 熔断器关闭（默认 3）
+              "max_in_flight": 0 }      // 在途并发不限（默认 3，满额会让选号直接失败）
+```
+
+此时上游的 429/402/12153 会原样回传给客户端，网关不再替你退避——账号密钥不再因
+冷却/满额报 `no_healthy_account`（账号真的未加载仍会报，那是 `auth.json` 缺凭证）。
+代价是被限流时会持续硬撞上游，多账号池的调度优势也随之失去。
+
 ---
 
 ## token 自动续期
@@ -495,8 +521,14 @@ Only CodeBuddy / Trae / Qoder 会把 `tool_calls` 原样回给你；豆包 / Dee
 ```
 token-watch <uid>: renewed provider=trae left_before=1h58m left_after=8h0m revived=false
 token-watch <uid>: 凭证仍在有效期（7h59m 后过期），已自动解除凭证类禁用（provider=qoder）
-WARN: token-watch <uid>: trae token 已过期 12h34m，无法自助续期 → 需重新登录
+# 过期但还能靠长期凭证自愈（trae 的会话 / 其他家的 refreshToken）——本次没换成功，20m 后再试：
+WARN: token-watch <uid>: trae token 已过期 13h43m，仍可用长期凭证自愈（本次未换成功，20m0s 后重试）：…
+# 真得人工重登（既无 refreshToken、也无会话凭证）：
+WARN: token-watch <uid>: qoder token 已过期 3h20m，且无 refreshToken/会话凭证可自救 → 需重新登录：…
 ```
+
+> 看到第一条（trae 过期但仍自愈）不必紧张：上游铸令牌偶发失败（网络抖动/5xx）时就是这样，
+> 看护会自己重试；只有第二条才是真得去重粘凭证。
 
 ---
 
@@ -509,11 +541,50 @@ WARN: token-watch <uid>: trae token 已过期 12h34m，无法自助续期 → �
 该供应商没有可用账号，或 token 过期。看启动日志里的凭证体检：
 
 ```
-WARN: [auth] trae/我的trae 凭证已于 2026-11-01 20:38 过期 … 需人工重新登录
+WARN: [auth] qoder/我的qoder 凭证已于 2026-11-01 20:38 过期，且无 refreshToken（不能自动刷新）；续期：./login qoder <昵称>
+# trae 的体检措辞不同：它能靠登录会话自愈，所以不要求人工重登
 ```
 
-**Q：Trae 明明刚登录，过一晚又 401？**
-它的 JWT 只有 **8h**，且续期接口 `GetUserToken` **只接受未过期**的 token。确认看护在跑（日志有 `token 自动续期已启用`），若已错过窗口只能重新登录一次，之后由看护接管。
+**Q：账号密钥报 `503 no_healthy_account: pinned account … unavailable (cooling/disabled/not loaded)`？**
+账号级密钥只走绑定的那一个号，该号被冷却/禁用就直接失败（绝不换号）。用同一把 key 请求
+`GET /status` 可看它到底是 `cooling`（含 `cool_remaining_sec`）、`disabled`（含
+`disabled_reason`）还是 `in_flight` 满额。不想等冷却就把 `cooldown.disabled` 设为 `true`
+（见「账号池调度」）。
+
+**Q：Trae 的 JWT 只有 8h，是不是得每天重登？**
+不用。Trae 是**两层令牌**：8h 的 `Cloud-IDE-JWT` 只是短期衍生品，底下还有一枚长期有效的
+登录会话标识 `source_id`（= JWT `payload.data.source_id` = 请求头 `X-Cloudide-Session`，
+网关存在 `extra.sourceId`）。实测《GetUserToken 返什么令牌》：
+
+| 发什么 | 拿回什么 |
+|---|---|
+| 只发 `X-Cloudide-Session`（连 `X-Uid` 都不带） | **新铸 JWT，寿命 = now + 8h** ✅ |
+| 只发 `X-Cloudide-Token: <有效 JWT>` | 同一个 `exp` 的令牌（**回显，不续命**！） |
+| 只发 `X-Cloudide-Token: <过期 JWT>` | 401 / `20101` Token 无效 |
+| 只发 `X-Uid` | 401 / `20101` |
+
+第三行是关键：**拿 JWT 本身续期是个错觉**——未过期时它只回显当前令牌（到期时刻不推后），
+过期后直接 401。只有带上会话凭证才会真的把寿命重置为 now+8h。
+所以旧版只发 `X-Cloudide-Token` 的实现，“自动续期成功”其实一点命也没续上。
+
+因此 Trae 真正需要的输入只有 `source_id` 一个，且登录向导已支持只给它：
+
+```bash
+echo '{"sourceId":"<从 F12 复制的 X-Cloudide-Session>"}' | docker exec -i reverse-proxy /app/login trae 我的trae
+```
+
+剩下的交给看护：每 10m 巡检，剩 2h（`refresh_window_by_provider.trae`）就靠会话铸新令牌；
+即使停机过夜、令牌已过期，启动后也能自救（实测：过期 13h43m 的号启动即续回 8h）。
+真正还需要手工的只有一种：**会话本身失效**（在别的设备登出、或改密码顶掉会话）——
+那时重新从 F12 复制一份 `X-Cloudide-Session` 跑同一条命令即可（`auth.json` 里没 `sourceId` 时也可这样补）。
+
+> 2026-11-04 修了一个“看护看上去在跑、其实从未生效”的坑：旧版 `login` 自己解 JWT 的 `exp` 时，
+> 先补 `=` 再用 `base64.RawURLEncoding` 解码——Raw 编码不接受填充，载荷长度不是 4 的倍数时
+> 必然失败（实测约 3/4 的 Trae JWT 命中），于是 `expiresAt` 被写成 `farFuture`(2100)。
+> `NeedsRefresh` 与 token 看护都按这个字段判定，结果是**既不续期也不告警**，
+> 账号每次都在登录后整 8h 静默死亡（看起来就像“只能人工重粘 JWT”）。现在 `exp` 统一由
+> `auth.JWTExp` 解析，且加载 trae 凭证时以令牌自身 `exp` 为权威收紧占位值（历史 2100 值下次
+> 启动即修正）；续期失败时日志会区分“仍可自愈”与“真得重登”，不再默默放着死号。
 
 **Q：豆包说不了话 / 不能执行命令？**
 豆包网页版接口**不支持 Function Calling**，请求里的 `tools` 会被忽略，只能纯文本问答。要跑 shell 请用 CodeBuddy / Trae / Qoder 的密钥。

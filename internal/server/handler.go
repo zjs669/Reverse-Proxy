@@ -61,8 +61,10 @@ type Config struct {
 	// 此段仅用于藏掉少数会报错/不想暴露的模型（如付费旗舰、primary-model 别名）。
 	// 段为空/缺省 = 不排除任何模型（全量动态）。绝不再整表写死。
 	Models map[string][]string
-	// CooldownDisabled 关闭限流冷却：true 时 429/404 不再自动冷却账号
-	// （仅余额耗尽、session 死亡仍按原逻辑）。配合 pool.breaker_threshold=0 彻底关闭限流。
+	// CooldownDisabled 关闭网关侧的全部频率限制与风控（config.cooldown.disabled）：
+	// true 时任何错误分类都不罚账号——软限流/404 冷却、余额耗尽硬冷却、12153 禁用、
+	// 5xx 熔断计数全部跳过（pool 侧同步把冷却/禁用入口做成空操作，见 pool.SetPenaltyDisabled）。
+	// 请求照旧轮转或直接回传上游原始错误，由使用者自行判断换号/补额度。
 	CooldownDisabled bool
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 
@@ -361,9 +363,16 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	region := regionFromCtx(r)
 	uid := uidFromCtx(r)
 	provider := providerFromCtx(r)
+	list := h.modelList(region, provider, uid)
+	// OpenAI 口径的 data 必须是数组：modelList 刻意返回 nil（如 trae 从未成功拉过目录
+	// 又不愿拿 codebuddy 表冒充）时，json 会把 nil 切片写成 `null`，客户端（DSH 等）会直接
+	// 报“neither a data array nor a models object”并要求手工录入模型——空列表比这好处理。
+	if list == nil {
+		list = []map[string]any{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(region, provider, uid),
+		"data":   list,
 	})
 }
 
@@ -921,7 +930,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // kind 是唯一权威分类（来自 upstream.Classify），此处不再按原始 status 二次判断。
 // 仅在 chatCompletions 轮转循环内调用：调用方已准备好 lastErr 并打算 continue 换号。
 //
-// 七条路径，各司其职：
+// 七条路径，各司其职（cooldown.disabled=true 时整个函数空操作，一条也不施加）：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
 //   - ErrSoftRate → 默认 Cooldown(CoolSoft, soft_rate) 连续触发指数退避（封顶 soft_rate_max）；
 //     若上游 body 为模型级 6004 且带重置时间 → CooldownSoftForModel（until=重置墙钟，
@@ -940,16 +949,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
 // 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string) {
+	// 关闭频率限制与风控：不论哪类错误都不罚账号（含余额耗尽的硬冷却与 12153 禁用）。
+	// 上游原始错误仍经 lastErr 回传客户端，网关不再替上游做冷却调度。
+	if h.cfg.CooldownDisabled {
+		return
+	}
 	switch kind {
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
 		// 不需要异步核查（冗余）。立即换号。
 		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
 	case upstream.ErrSoftRate:
-		// 关闭限流冷却：不再冷却账号，仅由调用方继续轮转（lastErr 已记录）。
-		if h.cfg.CooldownDisabled {
-			return
-		}
 		// 模型级 6004 且带「将在 … 重置」时间（issue #31）：冷却到上游明说的重置墙钟
 		// （封顶 soft_rate_max），记录触发模型 → 该账号对**其他模型**请求可豁免冷却。
 		// 解析失败（无时间文案 / 非 6004）→ 退回既有 600s 基数 + 指数退避现况。
@@ -967,16 +977,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。
-		// 关闭限流冷却时跳过（不罚账号）。
-		if !h.cfg.CooldownDisabled {
-			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
-		}
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
-		// 关闭限流冷却时跳过（不罚账号、不喂熔断）。
-		if !h.cfg.CooldownDisabled {
-			h.cfg.Pool.NoteError(uid)
-		}
+		h.cfg.Pool.NoteError(uid)
 	case upstream.ErrContentBlocked:
 		// 内容策略拦截（误报）：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
 		// passthrough 模式由 chatCompletions 内降级重试处理；custom 模式本不会到此分支。

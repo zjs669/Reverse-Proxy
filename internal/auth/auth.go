@@ -42,6 +42,28 @@ func JWTDataString(token, key string) string {
 	return strings.TrimSpace(v)
 }
 
+// JWTExp 读取 JWT 载荷的顶层 exp（Unix 秒，不验签）；非 JWT / 无 exp 返回 0。
+//
+// 为什么不各自再写一份 base64url 解码：历史教训是 cmd/login 自己写了一个 jwtExp，
+// 先补 '=' 再用 RawURLEncoding 解——RawURLEncoding 不接受填充，载荷长度不是 4 的倍数时
+// 直接报 illegal base64 data（实测约 3/4 的 Trae JWT 命中），jwtExp 返回 0，登录就把
+// expiresAt 写成 farFuture(2100)。NeedsRefresh 永假、token 看护永远判定“还剩几十年”，
+// 既不续期也不告警，账号每次都在登录 8h 后整点死亡。统一走本函数（内部 jwtPayload
+// 先去尾填充再补全 + URLEncoding），单一实现不再分叉。
+func JWTExp(token string) int64 {
+	d := jwtPayload(token)
+	if d == nil {
+		return 0
+	}
+	switch v := d["exp"].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	}
+	return 0
+}
+
 // jwtPayload 解出 JWT 的载荷对象（不验签，只做 base64url 解码）。
 func jwtPayload(token string) map[string]any {
 	parts := strings.Split(strings.TrimSpace(token), ".")
@@ -212,6 +234,15 @@ func Parse(raw []byte) (*Auth, error) {
 
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
+	}
+	// Trae 的 accessToken 就是 Cloud-IDE-JWT，载荷 exp 是它真实寿命（8h）——以令牌自身为准修正
+	// expiresAt：旧版 login 的 farFuture(2100) 占位值（或任何偏大的写入）会让 NeedsRefresh 永假、
+	// token 看护每轮判定“还剩几十年”而跳过，结果是既不续期也不告警，账号登录 8h 后整点死亡。
+	// 只在存储值比 exp 更晚（或未写）时收紧；更早则保留（更保守，可能是上游告知的精确到期）。
+	if a.Provider == "trae" {
+		if exp := JWTExp(a.AccessToken); exp > 0 && (a.ExpiresAt <= 0 || a.ExpiresAt > exp) {
+			a.ExpiresAt = exp
+		}
 	}
 	return &a, nil
 }

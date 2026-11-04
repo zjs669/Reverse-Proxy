@@ -82,34 +82,56 @@
 ```jsonc
 {
   "provider": "trae",
-  "accessToken": "Cloud-IDE-JWT 的 JWT 原文",
-  "refreshToken": "可选：Trae refresh token（ExchangeToken 刷新用）",
-  "expiresAt": 0,
-  "uid": "X-Uid（Trae 账号标识）",
+  "accessToken": "Cloud-IDE-JWT 的 JWT 原文（可由 sourceId 铸出来，不必手粘）",
+  "refreshToken": "可选：Trae refresh token（ExchangeToken 兜底路，未经验证）",
+  "expiresAt": 1793782411,     // 由 JWT 的 exp 自动写入，不手填
+  "uid": "X-Uid（← JWT data.id，自动解析）",
   "nickname": "我的trae",
   "extra": {
     "appId": "",        // 留空用内置 traeAppID
     "appVersion": "",   // 留空用内置 traeAppVersion
-    "sourceId": "JWT payload.data.source_id（X-Cloudide-Session 头值，脚本自动解析，无需手填）"
+    "sourceId": "**长期凭证**：JWT payload.data.source_id = 请求头 X-Cloudide-Session（续期靠它）"
   }
 }
 ```
 
-**最少 JSON**：`{"accessToken":"<Cloud-IDE-JWT 原文>"}` —— **只给 accessToken 就够了**。`uid`（X-Uid ← `data.id`）、`expiresAt`（← `exp`）、`extra.sourceId`（← `data.source_id`）全部由向导从 JWT 载荷自动解析；`refreshToken` 可省。
+**最少 JSON**：`{"sourceId":"<X-Cloudide-Session 的值>"}` —— **只给登录会话标识就够了**，
+向导会拿它向 `GetUserToken` 铸一枚新 JWT 再入库（`uid ← data.id`、`expiresAt ← exp`、
+`extra.sourceId` 全部自动解析）。也可依旧粘 JWT：`{"accessToken":"<Cloud-IDE-JWT 原文>"}`。
 
-- **请求头（缺一不可）**：
-  - `Authorization: Cloud-IDE-JWT <jwt>` ← `accessToken` 原样填入（Bearer 风格的 `Cloud-IDE-JWT ` 前缀由网关加）
-  - `X-Cloudide-Token: <jwt>` ← 与 `accessToken` 同源
-  - `X-Uid: <uid>` ← 账号标识
-  - **`X-Cloudide-Session: <source_id>` ← 必需！值取自 JWT 的 `payload.data.source_id`**。缺失时上游会拒绝或限流。
-    取值优先级：`extra.sourceId`（显式覆盖）→ **从当前 `accessToken` 自动解析**（默认路径）。
-    不存死的原因是 token 看护换新 JWT 后 `source_id` 会变，存死会拿旧会话打上游。
-    `login` 向导也会把解析结果写进 `extra.sourceId`，方便肉眼核对。
+- **请求头**（2026-11-04 逐头拆分实测，只留一个头发出去）：
+  - **`Authorization: Cloud-IDE-JWT <jwt>` —— 对话/模型目录接口真正必需的只这一项**。
+    只带它（无 Token/Session/Uid 头）拉目录与跑对话都是 200；少了它就统一 401 / code `1001`。
+  - `X-Cloudide-Token: <jwt>` ← 与 `accessToken` 同源；**单独不能代替 Authorization**（目录接口 401）。
+  - `X-Uid: <uid>` ← 账号标识；实测可缺省，网关仍然携带（部分接口会用它定位账号）。
+  - `X-Cloudide-Session: <source_id>` ← **续期接口的必需凭证**（对话侧实测可缺省，网关照旧携带）。
+    取值优先级：`extra.sourceId`（显式覆盖）→ 从当前 `accessToken` 自动解析。
+    不存死的原因是：同一个登录会话里 source_id 不变（实测），但**重新登录/换设备会变**，
+    存死会拿着上一个会话的 id 打上游。`login` 向导会把解析结果写进 `extra.sourceId`，
+    方便肉眼核对（也是 JWT 已丢/过期时的取值来源）。
 - 模型名需带 `__dev` 后缀（网关自动补全）；`messages[].content` 必须是 `parts` 数组。
-- **`expiresAt` 由 login 向导自动从 JWT 的 `exp` 字段解析写入**（无需手填）；缺失会导致网关每次对话都尝试刷新、无 refreshToken 时直接拒绝。JWT 是无状态 session 令牌，通常只有几小时有效，过期后取新 JWT 重跑向导即可。
+- **`expiresAt` 由 login 向导自动从 JWT 的 `exp` 解析写入**（无需手填）。JWT 寿命 **8h**，
+  但过期后**不需要人工重登**：见下面「两层令牌模型」。
+- **两层令牌模型（2026-11-04 逐头发实测，推翻了旧结论）**——`GetUserToken` 返什么：
+
+  | 发什么 | 拿回什么 |
+  |---|---|
+  | 只发 `X-Cloudide-Session`（无 JWT、无 `X-Uid`） | 200，**新铸 JWT，exp = now + 8h** ✅ |
+  | `X-Cloudide-Session` + `X-Uid` | 200，同上 |
+  | 只发 `X-Cloudide-Token: <未过期 JWT>` | 200，但是**同一枚令牌原样回显**（exp 不推后 → 不续命） |
+  | 只发 `X-Cloudide-Token: <过期 JWT>` | 401 / code `20101` Token 无效 |
+  | 把 source_id 放 `X-Cloudide-Token`（头名错） | 401 / `20101` |
+  | 只给 `X-Uid` | 401 / `20101` |
+
+  两个关键结论：① **`source_id` 是 Trae 唯一的长期凭证**（浏览器好几天不打开也免验证就是靠它）；
+  ② **拿 JWT 自身续期是错觉**——未过期时只回显、过期后直接 401，所以旧版只发
+  `X-Cloudide-Token` 的实现“刷新成功”其实一点命也没续上（网关现在两个头都发，会话必带）。
+  看护每 10m 巡检，剩 2h（`refresh_window_by_provider.trae`）就靠会话铸新令牌；
+  即使停机过夜、令牌已过期，启动后也能自救（实测：过期 13h43m 的号启动即续回 8h）。
+  真正需要手工的只剩一种：**会话本身失效**（在别的设备登出）→ 重粘一份 `X-Cloudide-Session`。
 - **已知现象**：Trae 上游对新账号/免费档可能直接返回"exceeded the rate limit"作为正常 SSE chunk（非 HTTP 429）。这是账号侧限流，不是网关问题；换账号或等冷却后可正常对话。
-- **Token 获取**：跑 `./login trae <昵称>`（或容器内 `/app/login trae <昵称>`；Trae **没有**区域参数，多写一个 `cn` 会被当成昵称），粘贴 `Cloud-IDE-JWT` 后向导自动解析 `exp→expiresAt`、`data.source_id→extra.sourceId`，写进 `auth.json` 的 `trae_<n>` 条目。
-- ⚠️ Trae 刷新协议（ExchangeToken）细节未经实机验证；刷新失败会禁用账号，重新取 JWT 写回即可。
+- **Token 获取**：`./login trae <昵称>`（容器内 `/app/login trae <昵称>`；Trae **没有**区域参数，多写一个 `cn` 会被当成昵称）。`sourceId` 与 `accessToken` 任给一个即可；同 uid 的续期会**覆盖原槽位**（不会长出 `trae_2`），`account_keys` 里的密钥沿用不覆盖。
+- ⚠️ Trae 的兜底刷新路径（ExchangeToken）细节仍未经验证；主路径 GetUserToken 已实机验证（见上）。
 
 ### 2.2 Qoder（provider="qoder"）
 
@@ -347,7 +369,7 @@ curl -N http://127.0.0.1:7863/v1/chat/completions \
 | Qoder `qoder: missing machine fingerprint` | `extra` 缺 machineID/machineToken/machineType | 用 `scripts/qoder_bootstrap.py` 重新生成 |
 | Qoder 401 → 反复 refresh 仍死 | dt-/drt- 失效（或误用了 PAT 换的 jt-） | 重新走设备流拿真 dt-/drt- 写回 auth.json 的 qoder_<n> 条目 |
 | Trae 400 / 模型找不到 | 模型名未带 `__dev` 或目录未拉到 | 先调一次 `/models` 触发 `FetchModels` 建立映射 |
-| Trae `ErrSessionDead` 频繁 | JWT 过期/无效 | 重新取 Cloud-IDE-JWT 写回 auth.json 的 trae_<n> 条目 |
+| Trae `ErrSessionDead` 频繁 | JWT 过期/无效（正常情况下看护会靠 source_id 会话自动铸新的） | 先看日志有无 `token-watch … renewed provider=trae`；若报“无 refreshToken/会话凭证可自救”，说明 `extra.sourceId` 缺失或会话已失效 → 重粘 `X-Cloudide-Session` 跑 `login trae` |
 | 豆包 401/403 或 `doubao session invalid` | `sessionid` 失效（登出/换设备/风控） | 重新从浏览器取 `sessionid` 写回 auth.json 的 doubao_<n> 条目，网关会热加载 |
 | 豆包 `710022002` / 710022004 或 429 | 风控限流（缺 `ttwid` / 指纹异常 / 调用过快） | 补 `ttwid`、`passport_csrf_token`；降低并发；必要时换号 |
 | 豆包回复为空但流正常结束 | 事件结构变化（`content` 嵌套更深） | 抓一次上游原始 SSE 存盘，对照 `doubaoWalk` 的解析分支 |
@@ -416,9 +438,10 @@ curl /v1/chat (doubao 账号密钥)     → 503 no_healthy_account（尚未放�
 
 ### 8.3 获取什么（凭证来源速查，含最少 JSON）
 - **codebuddy**：`./login codebuddy cn|intl <昵称>` 走 OAuth 设备流（无需粘贴 JSON）。
-- **trae**：`./login trae <昵称>` 粘贴 `{"accessToken":"<Cloud-IDE-JWT>","uid":"<X-Uid>"}`（自动解析 `exp`/`source_id`）。
+- **trae**：`./login trae <昵称>` 粘 `{"sourceId":"<X-Cloudide-Session>"}`（向导拿它铸 JWT，`exp`/`data.id`/`source_id` 全自动）；也可直接粘 `{"accessToken":"<Cloud-IDE-JWT>"}`。
 - **qoder**：`./login qoder <昵称>` 粘贴 `{"pat":"pt-…"}`（自动兑换+生成指纹+兜底 uid）；或设备流 `{"accessToken":"dt-…","refreshToken":"drt-…"}`（`scripts/qoder_bootstrap.py`）。
 - **doubao**：`./login doubao <昵称>` 粘贴 `{"sessionid":"…"}`（`scripts/doubao_session.py`）。
+- **deepseek**：`./login deepseek <昵称>` 粘贴 `{"accessToken":"mb5+…"}`（即 localStorage `userToken.value`；上游无 refresh，失效只能重粘）。
 
 ### 8.4 踩坑点（本仓库真实教训，务必避开）
 1. **值接收者 + `modelMap` = 映射永久失效**：provider 以值存进 `providers` map，若 `FetchModels` 用值接收者，`p.modelMap=mm` 写在副本上被丢弃 → `resolveModel` 永远拿到空 map → 把客户端模型名**原样当上游 key 发出**（例：`qwen3.8-flash` 真实 key 是 `qfmodel`，发错名上游会走默认模型）。→ **有共享状态就指针接收者 + 存指针**。
