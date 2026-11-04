@@ -1,0 +1,19 @@
+# Go 构建产物（用 docs/10-toolchain.md 里的 Docker 命令生成）
+bin/
+*.exe
+
+# Android 构建产物
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+app/libs/*.aar
+
+# Go 二进制（由 docs/60-build-and-verify.md 的 Docker 命令生成后拷进来）
+app/src/main/jniLibs/
+
+# 本地配置与凭证（绝不入库）
+config.json
+auths/
+data/

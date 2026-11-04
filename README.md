@@ -75,6 +75,7 @@ Sliverkiss/workbuddy2api          （原始项目，上游已删库）
 - [账号池与路由](#账号池与路由)
 - [token 自动续期](#token-自动续期)
 - [常见问题](#常见问题)
+- [Android App（手机当网关）](#android-app手机当网关)
 - [安全](#安全)
 - [License](#license)
 
@@ -93,6 +94,7 @@ Sliverkiss/workbuddy2api          （原始项目，上游已删库）
 | 工具调用 | CodeBuddy / Trae / Qoder 支持 `tools` / `tool_calls`；豆包 / DeepSeek 不支持（见 FAQ） |
 | 会话粘性 | 同一会话尽量复用同一账号，降低上下文丢失 |
 | 定时任务 | 签到、活跃上报、token 保活（仅 CodeBuddy 体系有意义） |
+| **Android App** | 同一套网关打包成 APK，手机自己就是网关，见 [`apk/`](apk/) |
 
 ---
 
@@ -628,6 +630,30 @@ docker restart reverse-proxy
 
 **Q：容器连不上国际版 `codebuddy.ai`？**
 宿主机代理的 fake-ip 会把它解析成 `198.18.x.x`。`docker-compose.yml` 已用 `extra_hosts` 固定真实 IP；IP 失效时按注释里的 DoH 命令重新解析替换。
+
+---
+
+## Android App（手机当网关）
+
+不想用服务器？`apk/` 目录把同一套网关打包成 Android App —— **手机自己就是网关**，监听 `127.0.0.1:7863`，对外提供同样的 OpenAI 兼容接口。
+
+| 项 | 说明 |
+|---|---|
+| 支持架构 | arm64-v8a（真机） |
+| 供应商 | 与主项目一致；Trae 只填 `sourceId`、Qoder 只填 `pat`、CodeBuddy 点按钮生成授权链接 |
+| 密钥 | 主密钥（调度全池）+ **账号级密钥**（一号一把，锁死单号），与 `gen_account_keys.py` 同口径 |
+| 续期 | 网关每 10 分钟自动巡检；App 另提供「立即续期」按钮 |
+
+**构建时要开 cgo**，否则网关的所有上游请求都会失败：
+
+```
+dial tcp: lookup api.trae.cn on [::1]:53: read udp [::1]:43413->[::1]:53:
+read: connection refused
+```
+
+原因是 Go 标准库在 `GOOS=android` 下**强制要求 cgo 解析器**（`src/net/conf.go`，issue #10714）。`CGO_ENABLED=0` 编出来的二进制会退回纯 Go 解析器，去读 Android 上并不存在的 `/etc/resolv.conf`，最终落到 `localhost:53`。这跟账号、密钥、手机网络无关，**只与构建参数有关**。
+
+完整构建步骤、目录结构、踩坑记录见 [`apk/README.md`](apk/README.md)。
 
 ---
 
