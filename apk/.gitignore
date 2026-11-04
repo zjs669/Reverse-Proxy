@@ -1,8 +1,6 @@
-# Go 构建产物（用 docs/10-toolchain.md 里的 Docker 命令生成）
+# ---- 构建产物 ----
 bin/
 *.exe
-
-# Android 构建产物
 .gradle/
 build/
 local.properties
@@ -10,10 +8,13 @@ local.properties
 .idea/
 app/libs/*.aar
 
-# Go 二进制（由 docs/60-build-and-verify.md 的 Docker 命令生成后拷进来）
-app/src/main/jniLibs/
-
-# 本地配置与凭证（绝不入库）
+# ---- 本地配置与凭证（绝不入库）----
 config.json
 auths/
 data/
+
+# 说明：app/src/main/jniLibs/ 里的网关二进制**要入库**（10.4MB，远低于 GitHub
+# 单文件 100MB 上限）。提交它是为了让克隆者不装 NDK 也能直接 assembleDebug 出
+# 可用 APK —— 这个二进制必须 CGO_ENABLED=1 交叉编译，用默认纯静态方式编出来的
+# 会让网关所有上游请求报 "lookup ... on [::1]:53: connection refused"。
+# 详见 README 的「⚠️ 必须开 cgo」一节。

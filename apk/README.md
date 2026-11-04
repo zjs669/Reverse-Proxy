@@ -45,6 +45,13 @@ App 只是个外壳 —— 真正的网关是随 APK 一起分发的 Go 二进�
 
 - JDK 17
 - Android SDK（compileSdk 34）
+
+**只想打包、不想编 Go？** 仓库里已经带了编好的网关二进制
+（`app/src/main/jniLibs/arm64-v8a/libreverse-proxy.so`，10.4MB），
+**直接跳到第 2 步** `assembleDebug` 就行，不需要 NDK、不需要 Go。
+
+**要重新编网关**，另外需要：
+
 - **Android NDK r26** —— 必需，原因见下一节
 - Go 1.22+（或 Docker 里的 `golang:1.23-alpine`）
 
@@ -171,7 +178,7 @@ apk/
 │       │   ├── BootReceiver.kt      开机广播
 │       │   ├── Theme.kt / UiKit.kt  主题与通用控件
 │       │   └── ...
-│       ├── jniLibs/arm64-v8a/libreverse-proxy.so   ← 网关二进制（gitignore）
+│       ├── jniLibs/arm64-v8a/libreverse-proxy.so   ← 网关二进制（10.4MB，已入库）
 │       └── res/
 ├── docs/                            设计取舍与踩坑记录
 ├── build.gradle.kts
