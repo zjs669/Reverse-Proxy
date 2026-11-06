@@ -1,0 +1,32 @@
+services:
+  reverse-proxy:
+    build: .
+    container_name: reverse-proxy
+    restart: unless-stopped
+    # 以 root 运行：auths / data / config.json 均是宿主机目录的 bind mount，在容器内
+    # 归 root 所有（镜像里的 USER app 写不进去）——建号（login 写 auth.json / account_keys）、
+    # 状态落盘（data/state.json）、管理台删号都会 permission denied。
+    # 镜像本身仍保留非 root 默认用户，仅本部署显式提权。
+    user: "0:0"
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "7863:7863"
+    volumes:
+      # auths 下全部供应商凭证合并进单个 auth.json（顶层 map：键为账号标签，值为凭证）。
+      # 新增/修改账号后无需重启：网关每 5s 轮询本目录，登录写入后自动入池
+      # （老版本靠 `docker restart reverse-proxy` 重新加载）。
+      - ./auths:/app/auths
+      - ./data:/app/data
+      # config.json 可写：login 登录后会自动把 API 密钥写入 account_keys。
+      - ./config.json:/app/config.json
+    # 国际版 codebuddy.ai：宿主机代理 fake-ip DNS 会把域名解析成 198.18.x.x 假 IP，
+    # 容器直连假 IP 握手即断（TLS EOF）。这里固定真实 IP（腾讯云国际边缘，DoH 解析），
+    # 让容器绕过被劫持的 DNS 直连。IP 失效时用 DoH 重新解析替换：
+    #   curl -s "https://dns.alidns.com/resolve?name=www.codebuddy.ai&type=A"
+    #
+    # 供应商域名（www.doubao.com / trae-api-cn.mchost.guru / gateway.qoder.com.cn）均为国内解析，
+    # 正常直连即可。若容器内 `getent hosts <域名>` 也返回 198.18.x.x（同一 fake-ip 劫持），
+    # 按上面同样的方式追加一行固定真实 IP。
+    extra_hosts:
+      - "www.codebuddy.ai:43.160.158.125"

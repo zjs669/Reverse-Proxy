@@ -1,0 +1,20 @@
+# ---- 构建产物 ----
+bin/
+*.exe
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+app/libs/*.aar
+
+# ---- 本地配置与凭证（绝不入库）----
+config.json
+auths/
+data/
+
+# 说明：app/src/main/jniLibs/ 里的网关二进制**要入库**（10.4MB，远低于 GitHub
+# 单文件 100MB 上限）。提交它是为了让克隆者不装 NDK 也能直接 assembleDebug 出
+# 可用 APK —— 这个二进制必须 CGO_ENABLED=1 交叉编译，用默认纯静态方式编出来的
+# 会让网关所有上游请求报 "lookup ... on [::1]:53: connection refused"。
+# 详见 README 的「⚠️ 必须开 cgo」一节。

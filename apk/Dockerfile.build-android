@@ -1,0 +1,23 @@
+# 专用构建镜像：golang + Android NDK（Linux 版）
+#
+# 为什么单独建镜像：宿主机没装 Go，NDK 只有 Windows 版 clang（.cmd 在 Linux 容器跑不了），
+# 每次 docker run 现下 NDK 要几分钟。固化成镜像后重建 .so 只要十几秒。
+#
+# 为什么用 debian 而不是 alpine：NDK 的 clang 是 glibc 二进制，
+# 在 Alpine(musl) 下报 "cannot execute: required file not found"。
+FROM golang:1.23-bookworm
+
+ARG NDK_VERSION=r26d
+ARG NDK_URL=https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl unzip ca-certificates \
+ && curl -sL -o /tmp/ndk.zip "${NDK_URL}" \
+ && unzip -q /tmp/ndk.zip -d /opt \
+ && mv /opt/android-ndk-${NDK_VERSION} /opt/ndk \
+ && rm -f /tmp/ndk.zip \
+ && rm -rf /var/lib/apt/lists/* \
+ && /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang --version
+
+ENV ANDROID_NDK=/opt/ndk
+ENV CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang

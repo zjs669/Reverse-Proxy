@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reverse-Proxy 管理台</title>
+<style>
+:root{
+  --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+  --fg:#e6e9ef; --dim:#8b93a7; --good:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff;
+}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg)}
+a{color:var(--acc);text-decoration:none}
+.wrap{display:flex;min-height:100vh}
+aside{width:200px;background:var(--panel);border-right:1px solid var(--line);padding:16px 0;flex:0 0 auto}
+aside h1{font-size:14px;margin:0 16px 16px;letter-spacing:.5px;color:var(--dim);font-weight:600}
+aside nav a{display:block;padding:9px 16px;color:var(--fg);border-left:2px solid transparent}
+aside nav a:hover{background:var(--panel2)}
+aside nav a.on{background:var(--panel2);border-left-color:var(--acc);color:var(--acc)}
+main{flex:1;padding:22px 26px;min-width:0}
+h2{font-size:18px;margin:0 0 16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:14px}
+.card h3{font-size:13px;margin:0 0 12px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+.kv{display:grid;grid-template-columns:120px 1fr;gap:8px 14px}
+.kv .k{color:var(--dim)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+button{font:inherit;padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);cursor:pointer}
+button:hover{border-color:var(--acc)}
+button.primary{background:var(--acc);border-color:var(--acc);color:#0b0e14;font-weight:600}
+button.danger{color:var(--bad)}
+button:disabled{opacity:.45;cursor:not-allowed}
+input,select{font:inherit;padding:6px 10px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)}
+input:focus,select:focus{outline:none;border-color:var(--acc)}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+/* nowrap 操作列：签到 + 展开两个按钮不许换行，否则窄屏会把行撑高 */
+.nowrap{white-space:nowrap}
+.nowrap button{padding:3px 9px;font-size:12px}
+th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+tr:last-child td{border-bottom:none}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.good{background:var(--good)}.warn{background:var(--warn)}.bad{background:var(--bad)}.dim{background:var(--dim)}
+.tag{display:inline-block;padding:1px 7px;border-radius:4px;font-size:11px;background:var(--panel2);border:1px solid var(--line)}
+.tag.good{color:var(--good);border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.1)}
+.tag.warn{color:var(--warn);border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.1)}
+.tag.bad{color:var(--bad);border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.1)}
+.muted{color:var(--dim)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.spacer{flex:1}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.stat{background:var(--panel2);border-radius:8px;padding:12px}
+.stat .n{font-size:22px;font-weight:600}
+.stat .l{color:var(--dim);font-size:12px;margin-top:2px}
+#login{max-width:340px;margin:14vh auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:24px}
+#login h2{text-align:center}
+#login input{width:100%;margin:12px 0}
+#login button{width:100%}
+#toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
+#toast div{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--acc);padding:10px 14px;border-radius:6px;max-width:420px}
+#toast div.err{border-left-color:var(--bad)}
+#toast div.ok{border-left-color:var(--good)}
+.logs{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:#0b0e14;border:1px solid var(--line);border-radius:6px;height:420px;overflow:auto;padding:10px;white-space:pre-wrap;word-break:break-all}
+pre{margin:0;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:#0b0e14;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto}
+details{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}
+summary{cursor:pointer;color:var(--acc);font-size:12px}
+.hide{display:none}
+/* 建号弹窗：fixed 遮罩 + 可滚动面板（凭证输入框较宽，手机也能用） */
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.62);display:flex;align-items:center;justify-content:center;z-index:60}
+/* 必须比 .modal 更具体：两者都写 display，同优先级时后定义的 .modal 会赢，
+   结果是 hide 加不加都看得见、弹窗关不掉（已踩过一次）。 */
+.modal.hide{display:none}
+.modal-box{width:min(580px,94vw);max-height:88vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+.provider{display:flex;flex-direction:column;gap:2px;padding:10px 12px;margin-bottom:8px;border:1px solid var(--line);border-radius:8px;cursor:pointer}
+.provider:hover{border-color:var(--acc)}
+.provider b{font-size:13px;font-weight:600}
+.provider span{font-size:11px;color:var(--dim)}
+.urlbox{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;word-break:break-all;background:#0b0e14;border:1px solid var(--line);border-radius:6px;padding:8px}
+.provider .purl{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;color:var(--acc);word-break:break-all}
+.plink{color:var(--acc);text-decoration:none;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;word-break:break-all}
+.plink:hover{text-decoration:underline}
+.kv-actions{display:flex;gap:6px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div id="login" class="hide">
+  <h2>管理台登录</h2>
+  <p class="muted" style="font-size:12px;text-align:center;margin:0">口令为 admin.password，未配置则用网关主密钥</p>
+  <input id="pw" type="password" placeholder="口令" autocomplete="current-password">
+  <button class="primary" id="doLogin">登录</button>
+</div>
+
+<div class="wrap hide" id="app">
+  <aside>
+    <h1>Reverse-Proxy</h1>
+    <nav>
+      <a href="#/" data-tab="overview">概览</a>
+      <a href="#/accounts" data-tab="accounts">账号</a>
+      <a href="#/keys" data-tab="keys">密钥</a>
+      <a href="#/settings" data-tab="settings">设置</a>
+      <a href="#/logs" data-tab="logs">日志</a>
+    </nav>
+    <div style="margin:20px 16px 0"><button id="doLogout" style="width:100%">退出</button></div>
+  </aside>
+  <main id="view"></main>
+</div>
+
+<div id="toast"></div>
+
+<div id="addModal" class="modal hide">
+  <div class="modal-box">
+    <div class="row"><h3 id="addTitle" style="margin:0">添加账号</h3><span class="spacer"></span><button id="addClose">关闭</button></div>
+    <div id="addBody" style="margin-top:12px"></div>
+  </div>
+</div>
+
+<script>
+// ─── 基础设施 ───────────────────────────────────────────────────────
+const $ = s => document.querySelector(s);
+function toast(msg, kind){
+  const d = document.createElement('div');
+  d.className = kind || '';
+  d.textContent = msg;
+  $('#toast').appendChild(d);
+  setTimeout(()=>d.remove(), 4200);
+}
+async function api(path, opts){
+  opts = opts || {};
+  const init = { method: opts.method || 'GET', headers:{}, credentials:'same-origin' };
+  if (init.method !== 'GET') init.headers['X-Requested-With'] = 'fetch';
+  if (opts.body !== undefined){ init.headers['Content-Type']='application/json'; init.body = JSON.stringify(opts.body); }
+  const res = await fetch(path, init);
+  if (res.status === 401){ showLogin(); throw new Error('未登录'); }
+  const txt = await res.text();
+  let j = null; try { j = txt ? JSON.parse(txt) : null; } catch(e){}
+  if (!res.ok) throw new Error((j && (j.error||j.hint)) || ('HTTP ' + res.status));
+  return j;
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtRemain(sec){
+  if (sec === undefined || sec === null) return '-';
+  if (sec <= 0) return '已过期';
+  if (sec >= 86400) return '剩' + Math.floor(sec/86400) + '天';
+  if (sec >= 3600) return '剩' + Math.floor(sec/3600) + '小时';
+  if (sec >= 60) return '剩' + Math.floor(sec/60) + '分钟';
+  return '即将过期';
+}
+function fmtDur(sec){
+  if (!sec) return '-';
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60);
+  return (d? d+'d ':'') + (h? h+'h ':'') + m + 'm';
+}
+function fmtTime(unix){
+  if (!unix) return '-';
+  const d = new Date(unix*1000);
+  const p = n => String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
+}
+
+// ─── 登录 ───────────────────────────────────────────────────────────
+function showLogin(){ $('#login').classList.remove('hide'); $('#app').classList.add('hide'); }
+function showApp(){ $('#login').classList.add('hide'); $('#app').classList.remove('hide'); }
+$('#doLogin').onclick = async ()=>{
+  const pw = $('#pw').value;
+  if (!pw) return toast('请输入口令','err');
+  try{
+    await api('/admin/api/login', { method:'POST', body:{ password: pw } });
+    $('#pw').value=''; showApp(); route();
+  }catch(e){ toast(e.message,'err'); }
+};
+$('#pw').addEventListener('keydown', e=>{ if (e.key==='Enter') $('#doLogin').click(); });
+$('#doLogout').onclick = async ()=>{ try{ await api('/admin/api/logout',{method:'POST',body:{}}); }catch(e){} showLogin(); };
+
+// ─── 路由 ───────────────────────────────────────────────────────────
+const tabs = {
+  overview: renderOverview,
+  accounts: renderAccounts,
+  keys: renderKeys,
+  settings: renderSettings,
+  logs: renderLogs,
+};
+function route(){
+  const hash = location.hash || '#/';
+  const name = (hash.replace('#/','').split('?')[0]) || 'overview';
+  const fn = tabs[name] || tabs.overview;
+  document.querySelectorAll('aside nav a').forEach(a=>{
+    a.classList.toggle('on', a.dataset.tab === name);
+  });
+  fn();
+}
+window.addEventListener('hashchange', route);
+
+// ─── 概览 ───────────────────────────────────────────────────────────
+async function renderOverview(){
+  const v = $('#view');
+  v.innerHTML = '<h2>概览</h2><div class="card muted">加载中…</div>';
+  let o;
+  try{ o = await api('/admin/api/overview'); }catch(e){ v.innerHTML='<h2>概览</h2><div class="card">'+esc(e.message)+'</div>'; return; }
+  const p = o.pool;
+  const rows = (o.providers||[]).map(x=>
+    '<tr><td>'+esc(x.provider)+'</td><td>'+x.total+'</td><td>'+x.healthy+'</td><td>'+
+    (x.expiring? '<span class="tag warn">'+x.expiring+'</span>':'-')+'</td><td>'+
+    (x.expired? '<span class="tag bad">'+x.expired+'</span>':'-')+'</td></tr>').join('');
+  v.innerHTML = `
+    <h2>概览</h2>
+    <div class="card">
+      <div class="row">
+        <span><span class="dot good"></span>运行中</span>
+        <span class="muted">运行时长 ${fmtDur(o.uptime_sec)}</span>
+        <span class="muted">Redis ${esc(o.redis_mode)}</span>
+        <span class="muted">粘性会话 ${o.sticky_sessions}</span>
+        <span class="spacer"></span>
+        <button id="btnRenewAll">立即巡检续期</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>账号池</h3>
+      <div class="grid2">
+        <div class="stat"><div class="n">${p.total}</div><div class="l">总数</div></div>
+        <div class="stat"><div class="n" style="color:var(--good)">${p.healthy}</div><div class="l">健康</div></div>
+        <div class="stat"><div class="n" style="color:var(--warn)">${p.cooling}</div><div class="l">冷却</div></div>
+        <div class="stat"><div class="n" style="color:var(--bad)">${p.disabled}</div><div class="l">禁用</div></div>
+        <div class="stat"><div class="n">${p.in_flight_full}</div><div class="l">满载</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>累计请求</h3>
+      <div class="grid2">
+        <div class="stat"><div class="n" style="color:var(--good)">${o.success_total}</div><div class="l">成功</div></div>
+        <div class="stat"><div class="n" style="color:var(--bad)">${o.error_total}</div><div class="l">失败</div></div>
+        <div class="stat"><div class="n">${o.success_total+o.error_total>0? (100*o.success_total/(o.success_total+o.error_total)).toFixed(1):'-'}%</div><div class="l">成功率</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>按供应商</h3>
+      <table><thead><tr><th>供应商</th><th>总数</th><th>健康</th><th>24h内到期</th><th>已过期</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="muted">没有账号</td></tr>'}</tbody></table>
+    </div>`;
+  $('#btnRenewAll').onclick = async (e)=>{
+    e.target.disabled = true;
+    try{ await api('/admin/api/renew-all',{method:'POST',body:{}}); toast('已触发巡检续期，稍后刷新看结果','ok'); }
+    catch(err){ toast(err.message,'err'); }
+    finally{ e.target.disabled = false; }
+  };
+}
+
+// ─── 账号 ───────────────────────────────────────────────────────────
+let accCache = [];
+// providerCell 供应商 + 区域。
+// Trae / CodeBuddy / Qoder 都有国内、国际两套独立体系（域名与接口全不同），
+// 只显示 trae 看不出这个号打的是 trae.cn 还是 trae.ai —— 排查时必须能一眼区分。
+// Qoder 尤其明显：国内 gateway.qoder.com.cn，国际 api3.qoder.sh，
+// 两边的模型目录与签到活动完全不通用。
+function providerCell(a){
+  const p = esc(a.provider);
+  const r = a.region;
+  if (!r) return p;
+  // 只有真正的双区域供应商才标；其余 provider 的 region 默认 cn，标了是噪音
+  if (a.provider !== 'trae' && a.provider !== 'codebuddy' && a.provider !== 'qoder') return p;
+  const label = r === 'intl' ? '国际' : '国内';
+  const cls = r === 'intl' ? 'warn' : 'muted';
+  return p + ' <span class="tag ' + cls + '">' + label + '</span>';
+}
+
+// creditsCell 额度列。Credits 是整数，单位由 credits_unit 决定：
+// trae 国际版按美元计费、后端存的是美分（99 = $0.99），其余是「积分」。
+// 不区分单位就会把 99 美分显示成 99 积分，差 100 倍。
+function creditsCell(a){
+  if (!(a.credits > 0)) return '<span class="muted">-</span>';
+  if (a.credits_unit === 'USD') return '$' + (a.credits/100).toFixed(2);
+  return String(a.credits);
+}
+
+// checkinText 把签到结果渲染成一句话。
+// 五种状态各自有明确含义，不能统一显示「成功/失败」：
+//   ok          刚签到，显示到账额度与连签天数
+//   already     今天已签过（幂等，不是失败）
+//   unsupported 这家/这个区域没有签到体系（豆包、DeepSeek、codebuddy 国际版、trae 国际版）
+//   pending     签到体系存在但该号的身份还没核对（Qoder COSY 身份别名，见身份自检）
+//   failed      真失败
+// checkinText 签到结果的统一文案。**单点签到与一键签到共用这一套措辞**，
+// 否则同一件事在两处说法不同（一个说「签到完成」，另一个说「签到成功」），用户会犯迷糊。
+//
+// 返回纯文本，专供 toast（toast 用 textContent 渲染）。
+// 表格里要转义请用 checkinHtml —— 混用会让 &lt; 直接显示在提示条上。
+function checkinText(r){
+  switch(r.state){
+    case 'ok':          return '签到完成 +' + (r.credit||0) + (r.streak_days? '（连签 '+r.streak_days+' 天）':'');
+    case 'already':     return '已经签到';
+    case 'unsupported': return '没有签到入口';
+    case 'pending':     return '接口还在接入中' + (r.msg ? '：' + r.msg : '');
+    case 'failed':      return '签到失败' + (r.msg ? '：' + r.msg : '');
+    default:            return r.msg || r.state;
+  }
+}
+// checkinHtml 表格单元格用，对上游文案做转义。
+function checkinHtml(r){
+  const icon = r.state === 'ok' ? '✅ ' : (r.state === 'pending' ? '⏳ ' : (r.state === 'failed' ? '❌ ' : ''));
+  return esc(icon + checkinText(r));
+}
+function checkinClass(state){
+  switch(state){
+    case 'ok':        return 'good';
+    case 'already':   return 'muted';
+    case 'unsupported': return 'muted';
+    case 'pending':   return 'warn';
+    default:          return 'danger';
+  }
+}
+// checkinBadge 单点签到按钮签完后的短标签，与 checkinText 措辞一致。
+function checkinBadge(state){
+  switch(state){
+    case 'ok':          return '完成';
+    case 'already':     return '已签到';
+    case 'unsupported': return '没有签到';
+    case 'pending':     return '接入中';
+    default:            return '失败';
+  }
+}
+
+// runCheckinAll 一键签到：逐号签到并把每号结果列出来。
+// 只回一个「成功」没有意义 —— 用户要知道哪个号签上了、哪个号压根没有签到。
+async function runCheckinAll(btn){
+  btn.disabled = true; btn.textContent = '签到中…';
+  // 先把所有行的按钮置为「签到中…」，让用户立刻看到在跑
+  document.querySelectorAll('button[data-checkin]').forEach(b=>{
+    b.disabled = true; b.textContent = '签到中…';
+  });
+  try{
+    const r = await api('/admin/api/checkin-all',{method:'POST',body:{}});
+    const list = r.results || [];
+
+    // **结果直接写回每一行**，与单点签到完全一致的就地更新：
+    // 不开独立结果卡片、不整页重绘（重绘会丢展开的详情与滚动位置）。
+    list.forEach(x=>{
+      const b = document.querySelector('button[data-checkin="'+x.uid+'"]');
+      if (b){
+        b.textContent = checkinBadge(x.state);
+        b.className = checkinClass(x.state) === 'good' ? 'primary' : '';
+      }
+    });
+
+    // 积分列跟着刷新：签到完不刷，用户看到的还是旧值。
+    try{
+      const fresh = await api('/admin/api/accounts');
+      (fresh.accounts||[]).forEach(acc=>{
+        const cell = document.querySelector('[data-credit="'+acc.uid+'"]');
+        if (cell) cell.innerHTML = creditsCell(acc);
+        const idx = accCache.findIndex(y=>y.uid===acc.uid);
+        if (idx >= 0) accCache[idx] = acc;
+      });
+    }catch(e){}
+
+    // 汇总一条 toast，措辞与单点同一套（checkinText）
+    const cnt = {};
+    list.forEach(x=>{ cnt[x.state] = (cnt[x.state]||0) + 1; });
+    const parts = [];
+    if (cnt.ok)          parts.push('签到完成 ' + cnt.ok);
+    if (cnt.already)     parts.push('已经签到 ' + cnt.already);
+    if (cnt.unsupported) parts.push('没有签到入口 ' + cnt.unsupported);
+    if (cnt.pending)     parts.push('接入中 ' + cnt.pending);
+    if (cnt.failed)      parts.push('失败 ' + cnt.failed);
+    toast(parts.join(' · ') || '没有账号', cnt.failed ? 'err' : (cnt.ok ? 'ok' : ''));
+
+    // 按钮标签保留 4 秒再恢复，方便用户看清每个号的结果
+    setTimeout(()=>{
+      document.querySelectorAll('button[data-checkin]').forEach(b=>{
+        b.disabled = false; b.textContent = '签到'; b.className = '';
+      });
+    }, 4000);
+  }catch(e){
+    toast('一键签到失败：'+e.message,'err');
+    document.querySelectorAll('button[data-checkin]').forEach(b=>{
+      b.disabled = false; b.textContent = '签到';
+    });
+  }finally{
+    btn.disabled = false; btn.textContent = '一键签到';
+  }
+}
+
+async function renderAccounts(){
+  const v = $('#view');
+  v.innerHTML = '<h2>账号</h2><div class="card muted">加载中…</div>';
+  let data;
+  try{ data = await api('/admin/api/accounts'); }catch(e){ v.innerHTML='<h2>账号</h2><div class="card">'+esc(e.message)+'</div>'; return; }
+  accCache = data.accounts || [];
+  const rows = accCache.map(a=>{
+    const dot = a.disabled? 'bad' : (a.cooling? 'warn' : 'good');
+    return `<tr>
+      <td><span class="dot ${dot}"></span>${a.disabled? '禁用' : (a.cooling? '冷却':'正常')}</td>
+      <td>${providerCell(a)}</td>
+      <td class="mono">${esc(a.label)}</td>
+      <td>${a.expires_at? '<span class="tag '+(a.remain_sec<=0?'bad':(a.remain_sec<=86400?'warn':'good'))+'">'+fmtRemain(a.remain_sec)+'</span>' : '<span class="muted">无期限</span>'}</td>
+      <td data-credit="${esc(a.uid)}">${creditsCell(a)}</td>
+      <td>${a.success_count}</td>
+      <td>${a.err_total}</td>
+      <td class="nowrap">
+        <button data-checkin="${esc(a.uid)}" title="只签这一个号">签到</button>
+        <button data-uid="${esc(a.uid)}">展开</button>
+      </td>
+    </tr>`;
+  }).join('');
+  v.innerHTML = `<div class="row" style="margin-bottom:12px">
+      <h2 style="margin:0">账号 <span class="muted" style="font-size:13px;font-weight:400">${accCache.length} 个</span></h2>
+      <span class="spacer"></span>
+      <button id="btnCheckinAll">一键签到</button>
+      <button id="btnAddAccount" class="primary">+ 添加账号</button>
+    </div>
+    <div class="card"><table><thead><tr><th>状态</th><th>供应商</th><th>账号</th><th>凭证剩余</th><th>积分</th><th>成功</th><th>错误</th><th>操作</th></tr></thead>
+    <tbody>${rows||'<tr><td colspan="8" class="muted">没有账号，点右上角「+ 添加账号」</td></tr>'}</tbody></table></div>
+    <div id="detail"></div>`;
+  $('#btnAddAccount').onclick = ()=> openAddAccount();
+  $('#btnCheckinAll').onclick = (e)=> runCheckinAll(e.target);
+  v.querySelectorAll('button[data-uid]').forEach(b=>{
+    b.onclick = ()=> renderAccountDetail(b.dataset.uid);
+  });
+  v.querySelectorAll('button[data-checkin]').forEach(b=>{
+    b.onclick = ()=> checkinRow(b);
+  });
+}
+
+// checkinRow 行内签到：只签这一个号，就地更新积分列。
+//
+// 为什么不整页 renderAccounts()：那会重建整个表格，用户刚展开的详情面板、
+// 正在看的滚动位置全丢。这里只动两个东西——按钮文字和该行积分单元格。
+async function checkinRow(btn){
+  const uid = btn.dataset.checkin;
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '签到中…';
+  let r = null;
+  try{
+    r = await api('/admin/api/accounts/'+encodeURIComponent(uid)+'/checkin',{method:'POST',body:{}});
+  }catch(e){
+    toast('签到失败：'+e.message,'err');
+  }finally{
+    // 积分刷新放在 finally：签到报错时余额也可能已经变了
+    // （例如上游其实签成功了但响应超时），不刷会一直显示旧值。
+    try{ await refreshCreditCell(uid); }catch(e){}
+    btn.disabled = false;
+    if (r){
+      // 按钮短标签与 toast 文案都走 checkinBadge / checkinText，
+      // 保证单点与一键签到的措辞完全一致。
+      btn.textContent = checkinBadge(r.state);
+      toast(checkinText(r), r.state === 'ok' ? 'ok' : (r.state === 'failed' ? 'err' : ''));
+      setTimeout(()=>{ btn.textContent = old; }, 2000);
+    } else {
+      btn.textContent = old;
+    }
+  }
+}
+
+// refreshCreditCell 只重拉一次账号列表并就地更新单个积分单元格。
+//
+// 不整页 renderAccounts()：那会重建表格，用户展开的详情面板和滚动位置全丢。
+async function refreshCreditCell(uid){
+  const fresh = await api('/admin/api/accounts');
+  const acc = (fresh.accounts||[]).find(x=>x.uid===uid);
+  if (!acc) return;
+  const cell = document.querySelector('[data-credit="'+uid+'"]');
+  if (cell) cell.innerHTML = creditsCell(acc);
+  const idx = accCache.findIndex(x=>x.uid===uid);
+  if (idx >= 0) accCache[idx] = acc;
+}
+
+async function renderAccountDetail(uid){
+  const box = $('#detail');
+  box.innerHTML = '<div class="card muted">加载中…</div>';
+  let a;
+  try{ a = await api('/admin/api/accounts/' + encodeURIComponent(uid)); }
+  catch(e){ box.innerHTML = '<div class="card">'+esc(e.message)+'</div>'; return; }
+  const masked = a.account_key ? a.account_key.slice(0,6)+'…'+a.account_key.slice(-4) : '（未生成）';
+  // 积分查询按供应商能力开关：qoder（COSY /me/usage）、codebuddy / 国际版（billing meter）、
+  // trae（pay/user_current_entitlement_list，只需 JWT + source_id，无签名参数）。
+  // 豆包 / DeepSeek 是网页会话接口，没有积分概念 —— 不废话直接不显示按钮。
+  const canUsage = (a.provider === 'qoder' || a.provider === 'codebuddy' || a.provider === 'trae');
+  const noUsageHint = a.provider + ' 为网页接口，没有积分概念';
+  box.innerHTML = `<div class="card">
+    <div class="row"><h3 style="margin:0">${esc(a.label)} · ${esc(a.provider)}</h3><span class="spacer"></span>
+      <button id="btnClose">收起</button></div>
+    <div class="kv" style="margin-top:14px">
+      <div class="k">uid</div><div class="mono">${esc(a.uid)}</div>
+      <div class="k">备注</div><div>${esc(a.nickname)||'<span class="muted">-</span>'}</div>
+      <div class="k">区域</div><div>${esc(a.region)||'<span class="muted">-</span>'}</div>
+      <div class="k">到期</div><div>${a.expires_at? fmtTime(a.expires_at)+' ('+fmtRemain(a.remain_sec)+')' : '<span class="muted">无期限</span>'}</div>
+      <div class="k">最近成功</div><div>${fmtTime(a.last_success)}</div>
+      <div class="k">最近错误</div><div>${fmtTime(a.last_err)}</div>
+      ${a.disabled? '<div class="k">禁用原因</div><div class="danger">'+esc(a.disabled_reason)+'</div>':''}
+      ${a.cooling? '<div class="k">冷却</div><div>'+esc(a.cool_kind)+' 剩 '+fmtRemain(a.cool_remain_sec)+'</div>':''}
+    </div>
+    <details open>
+      <summary>专属密钥</summary>
+      <div class="row" style="margin-top:8px">
+        <span class="mono" id="keyText">${esc(masked)}</span>
+        <button id="btnShowKey">显示</button>
+        <button id="btnCopyKey">复制</button>
+        <button id="btnResetKey" class="danger">重置</button>
+        ${canUsage ? '<span class="spacer"></span><button id="btnUsage">查积分</button><span id="usageOut" class="muted"></span>' : ''}
+      </div>
+      ${canUsage ? '' : '<p class="muted" style="font-size:12px;margin:8px 0 0">' + esc(noUsageHint) + '</p>'}
+      <p class="muted" style="font-size:12px;margin:8px 0 0">一把 key 锁死这一个号，请求不参与池内轮换。与 gen_account_keys.py 同口径（64 位 hex）。</p>
+    </details>
+    <details id="identityBox" class="hide">
+      <summary>身份自检（Qoder COSY）</summary>
+      <div id="identityBody" style="margin-top:8px">
+        <button id="btnIdentity">检测</button>
+      </div>
+    </details>
+    <details>
+      <summary>模型</summary>
+      <div id="modelsBox" style="margin-top:8px"><button id="btnModels">获取</button></div>
+    </details>
+    <div class="row" style="margin-top:14px">
+      <button id="btnRenew" class="primary" ${a.renewable?'':'disabled'}>立即续期</button>
+      <button id="btnRevive">解除冷却/禁用</button>
+      <span class="spacer"></span>
+      <button id="btnDelete" class="danger">删除账号</button>
+    </div>
+  </div>`;
+
+  let revealed = false;
+  $('#btnClose').onclick = ()=>{ box.innerHTML=''; };
+  $('#btnShowKey').onclick = ()=>{
+    revealed = !revealed;
+    $('#keyText').textContent = revealed ? (a.account_key || '') : masked;
+    $('#btnShowKey').textContent = revealed ? '隐藏' : '显示';
+  };
+  $('#btnCopyKey').onclick = async ()=>{
+    try{ await navigator.clipboard.writeText(a.account_key||''); toast('已复制','ok'); }
+    catch(e){ toast('复制失败，请手动选中','err'); }
+  };
+  $('#btnResetKey').onclick = async ()=>{
+    if (!confirm('重置后旧密钥立即失效，用到它的客户端要换。继续？')) return;
+    try{
+      const r = await api('/admin/api/accounts/'+encodeURIComponent(a.uid)+'/key',{method:'POST',body:{}});
+      a.account_key = r.account_key; revealed = false;
+      toast('已重置','ok'); renderAccountDetail(a.uid);
+    }catch(e){ toast(e.message,'err'); }
+  };
+  // 身份自检：只对 qoder 显示。
+  //
+  // 为什么需要这块：uid 在网关侧是账号主键，但在 Qoder 侧又是 COSY 身份与
+  // cosy-user 头。写错时凭证完全有效、界面一切正常，只有 /algo 链路（模型目录、
+  // 对话、签到）静默 403 105 —— 没有这个按钮就只能靠翻日志猜。
+  //
+  // 「采纳」只写 extra.cosyUID，**不改 uid 本身**：uid 是 auth.json / account_keys /
+  // state.json 三处的主键，改了等于换号。
+  if (a.provider === 'qoder'){
+    $('#identityBox').classList.remove('hide');
+    const box = $('#identityBody');
+    const renderIdentity = (r)=>{
+      if (r.err){
+        box.innerHTML = '<div class="danger">探测失败：'+esc(r.err)+'</div>';
+        return;
+      }
+      const ok = r.match;
+      box.innerHTML = '<div class="kv">'
+        + '<div class="k">账号 uid</div><div class="mono">'+esc(r.account_uid)+'</div>'
+        + '<div class="k">请求身份</div><div class="mono">'+esc(r.cosy_uid)+'</div>'
+        + '<div class="k">上游真实 uid</div><div class="mono">'+esc(r.real_uid||'(未知)')+'</div>'
+        + '<div class="k">一致</div><div>'+(ok? '<span class="tag good">一致</span>' : '<span class="tag bad">不一致</span>')+'</div>'
+        + '</div>'
+        + (ok ? '<p class="muted" style="font-size:12px;margin:8px 0 0">身份正确，/algo 链路（模型目录 / 对话 / 签到）可用。</p>'
+             : '<p class="muted" style="font-size:12px;margin:8px 0 0">请求身份与上游不一致，该号的模型目录 / 对话 / 签到会返回 403 105。点「采纳真实 uid」按上游口径纠正（只改身份别名，不动账号 uid）。</p>'
+               + '<div class="row" style="margin-top:8px"><button id="btnAdopt" class="primary">采纳真实 uid</button></div>');
+      if (!ok){
+        $('#btnAdopt').onclick = async (e)=>{
+          e.target.disabled = true; e.target.textContent = '写入中…';
+          try{
+            const nr = await api('/admin/api/accounts/'+encodeURIComponent(a.uid)+'/identity',{method:'POST',body:{}});
+            toast('已采纳真实 uid','ok');
+            renderIdentity(nr);
+          }catch(err){
+            e.target.disabled = false; e.target.textContent = '采纳真实 uid';
+            toast('写入失败：'+err.message,'err');
+          }
+        };
+      }
+    };
+    $('#btnIdentity').onclick = async (e)=>{
+      e.target.disabled = true; e.target.textContent = '检测中…';
+      try{
+        const r = await api('/admin/api/accounts/'+encodeURIComponent(a.uid)+'/identity');
+        renderIdentity(r);
+      }catch(err){
+        toast('检测失败：'+err.message,'err');
+      }finally{
+        const b = $('#btnIdentity');
+        if (b){ b.disabled = false; b.textContent = '重新检测'; }
+      }
+    };
+  }
+  $('#btnModels').onclick = async (e)=>{
+    e.target.disabled = true; e.target.textContent = '获取中…';
+    try{
+      const r = await api('/admin/api/accounts/'+encodeURIComponent(a.uid)+'/models');
+      const ms = r.models || [];
+      $('#modelsBox').innerHTML = '<div class="row"><span class="muted">'+ms.length+' 个模型</span><button id="btnModels2">重新获取</button></div>' +
+        '<pre>' + (ms.length? esc(ms.join('\n')) : '（无）') + '</pre>';
+      $('#btnModels2').onclick = ()=> $('#btnModels').click();
+      // btnModels 已被替换，重新绑定到新按钮
+    }catch(err){
+      e.target.disabled = false; e.target.textContent = '获取';
+      toast(err.message,'err');
+    }
+  };
+  if (canUsage) $('#btnUsage').onclick = async (e)=>{
+    const out = $('#usageOut');
+    e.target.disabled = true; out.textContent = '查询中…'; out.className = 'muted';
+    try{
+      const u = await api('/admin/api/accounts/'+encodeURIComponent(a.uid)+'/usage');
+      if (!u.supported){
+        out.textContent = u.hint || '该供应商上游没有额度接口';
+        out.className = 'muted';
+        return;
+      }
+      // 单位由后端给（trae 国内版「积分」、国际版「USD」），不要在这里猜。
+      // USD 用 $ 前缀 + 两位小数：直接拼 "0.99223 / 1 USD" 会让人以为是积分。
+      const unit = u.unit || 'credits';
+      const money = unit === 'USD';
+      const fmt = (v)=> money ? '$'+(+v).toFixed(2) : v;
+      out.innerHTML = '<b>'+fmt(u.remaining)+'</b> / '+fmt(u.total)+(money ? '' : ' '+esc(unit))
+        + ' <span class="muted">（已用 '+fmt(u.used)+'，'+(u.percent||0).toFixed(1)+'%）</span>'
+        + (u.plan_name ? ' <span class="muted">'+esc(u.plan_name)+'</span>' : '');
+      out.className = '';
+    }catch(err){
+      out.textContent = '查询失败：'+err.message;
+      out.className = 'danger';
+    }finally{
+      e.target.disabled = false;
+    }
+  };
+  $('#btnRenew').onclick = async (e)=>{
+    e.target.disabled = true; e.target.textContent = '续期中…';
+    try{
+      const r = await api('/admin/api/accounts/'+encodeURIComponent(a.uid)+'/renew',{method:'POST',body:{}});
+      toast('续期成功，新到期 '+fmtTime(r.expires_at),'ok');
+      renderAccountDetail(a.uid);
+    }catch(err){
+      toast(err.message,'err');
+      e.target.disabled = false; e.target.textContent = '立即续期';
+    }
+  };
+  $('#btnRevive').onclick = async ()=>{
+    try{ await api('/admin/api/accounts/'+encodeURIComponent(a.uid)+'/revive',{method:'POST',body:{}}); toast('已解除','ok'); renderAccountDetail(a.uid); }
+    catch(e){ toast(e.message,'err'); }
+  };
+  $('#btnDelete').onclick = async ()=>{
+    if (!confirm('从 auth.json 删除 '+a.label+'？此操作不可撤销。')) return;
+    try{ await api('/admin/api/accounts/'+encodeURIComponent(a.uid),{method:'DELETE'}); toast('已删除','ok'); box.innerHTML=''; renderAccounts(); }
+    catch(e){ toast(e.message,'err'); }
+  };
+}
+
+// ─── 添加账号弹窗 ───────────────────────────────────────────────────
+// 两家 CodeBuddy 走设备流（生成授权链接 → 后台轮询收号）；其余四家粘凭证 JSON。
+// 归一/换令牌全在服务端（internal/provision），前端只负责收字段。
+// url：先在这个页面登录，再从 F12 / 开发者工具里取凭证。
+// how：取哪个字段 —— 写清楚到「点哪里、抄哪一段」，避免用户面对空白 JSON 发懵。
+const ADD_PROVIDERS = [
+  { id:'codebuddy',      name:'CodeBuddy 国内版', tag:'浏览器授权链接，登录后自动收号', mode:'oauth',
+    url:'https://www.codebuddy.cn', how:'点下面的「生成授权链接」，在弹出的页面登录即可，无需手抄凭证。' },
+  { id:'codebuddy_intl', name:'CodeBuddy 国际版', tag:'同上，账号在 codebuddy.ai', mode:'oauth',
+    url:'https://www.codebuddy.ai', how:'同上，授权链接会自动带上国际版域名。' },
+
+  { id:'trae',      name:'Trae 国内版', tag:'粘 sourceId（= 请求头 X-Cloudide-Session）', mode:'paste',
+    url:'https://www.trae.cn', how:'登录后 F12 → Network → 任选一个请求 → Request Headers → 复制 <code>X-Cloudide-Session</code> 的整串值。',
+    sample:'{\n  "sourceId": "<X-Cloudide-Session 的值>"\n}' },
+
+  { id:'trae_intl', name:'Trae 国际版', tag:'粘网页版 JWT 或 sourceId（两套独立体系）', mode:'paste',
+    url:'https://www.trae.ai', how:'登录后 F12 → Network → 找任意 API 请求 → Request Headers 里复制 <code>X-Cloudide-Session</code>；或从 localStorage 的 JWT 里取 <code>source_id</code>。',
+    sample:'{\n  "accessToken": "<网页版 JWT，带 source_id>",\n  "sourceId": "<可选，X-Cloudide-Session>"\n}' },
+
+  { id:'qoder',      name:'Qoder 国内版', tag:'只需 PAT（pt- 开头）· 支持每日签到（+100 Credits）', mode:'paste',
+    url:'https://qoder.com.cn/account/integrations', how:'在「集成 / Integrations」页新建一个 PAT，复制 <code>pt-</code> 开头那串。',
+    sample:'{\n  "pat": "pt-..."\n}' },
+
+  { id:'qoder_intl', name:'Qoder 国际版', tag:'只需 PAT（pt- 开头）· 域名与国内完全独立', mode:'paste',
+    url:'https://qoder.com/account/integrations', how:'同上，国际版在 qoder.com（与国内 qoder.com.cn 是两套独立体系，账号不通用）。',
+    sample:'{\n  "pat": "pt-..."\n}' },
+
+  { id:'doubao',   name:'豆包工作', tag:'粘 Cookie 里的 sessionid', mode:'paste',
+    url:'https://www.doubao.com/chat', how:'登录后 F12 → Application → Cookies → 选 <code>https://www.doubao.com</code> → 复制 <code>sessionid</code> 的值。',
+    sample:'{\n  "sessionid": "<从 Cookie 里取>",\n  "ttwid": "<可选>"\n}' },
+
+  { id:'deepseek', name:'DeepSeek', tag:'localStorage 里的 userToken.value', mode:'paste',
+    url:'https://chat.deepseek.com', how:'登录后 F12 → Application → Local Storage → 选 <code>chat.deepseek.com</code> → 找 <code>userToken</code>，复制其中的 <code>value</code> 字段（不是整段 JSON）。也可在 Console 执行 <code>JSON.parse(localStorage.userToken).value</code> 直接取值。',
+    sample:'{\n  "accessToken": "<userToken.value>"\n}' },
+];
+
+function openAddAccount(pid){
+  $('#addModal').classList.remove('hide');
+  const p = ADD_PROVIDERS.find(x=>x.id===pid);
+  if (!p) return renderProviderPicker();
+  renderAddForm(p);
+}
+$('#addClose').onclick = ()=> $('#addModal').classList.add('hide');
+
+function renderProviderPicker(){
+  $('#addTitle').textContent = '添加账号 · 选择供应商';
+  $('#addBody').innerHTML = ADD_PROVIDERS.map(p=>
+    `<div class="provider" data-p="${p.id}"><b>${esc(p.name)}</b><span>${esc(p.tag)}</span>` +
+    (p.url ? `<span class="purl">${esc(p.url)}</span>` : '') + '</div>'
+  ).join('');
+  $('#addBody').querySelectorAll('[data-p]').forEach(el=>{
+    el.onclick = ()=> renderAddForm(ADD_PROVIDERS.find(x=>x.id===el.dataset.p));
+  });
+}
+
+function renderAddForm(p){
+  $('#addTitle').textContent = '添加账号 · ' + p.name;
+  const head = `<div class="row" style="margin-bottom:8px"><button id="addBack">← 换一个</button></div>
+    ${p.url ? `<p class="muted" style="font-size:12px;margin:0 0 6px">1. 打开并登录：<a href="${esc(p.url)}" target="_blank" rel="noopener" class="plink">${esc(p.url)}</a></p>
+    <div class="row" style="margin:0 0 10px"><button id="btnOpenProvider">打开网址</button><button id="btnCopyProvider">复制网址</button></div>` : ''}
+    ${p.how ? `<p class="muted" style="font-size:12px;margin:0 0 10px">2. ${p.how}</p>` : ''}
+    <input id="addNick" placeholder="备注（可选，如 我的主号）" style="width:100%;margin-bottom:10px">`;
+  if (p.mode === 'oauth'){
+    $('#addBody').innerHTML = head + '<div id="oauthBox"><button class="primary" id="btnOAuthStart">生成授权链接</button></div>';
+    $('#btnOAuthStart').onclick = ()=> startOAuth(p);
+  } else {
+    $('#addBody').innerHTML = head +
+      `<textarea id="addCred" class="mono" style="width:100%;height:130px;background:#0b0e14;border:1px solid var(--line);border-radius:6px;padding:10px;color:var(--fg);font-size:12px">${esc(p.sample||'')}</textarea>
+       <div class="row" style="margin-top:10px"><button class="primary" id="btnAddSave">保存并加入账号池</button></div>`;
+    $('#btnAddSave').onclick = ()=> submitPaste(p);
+  }
+  $('#addBack').onclick = renderProviderPicker;
+  const bo = $('#btnOpenProvider'), bc = $('#btnCopyProvider');
+  if (bo) bo.onclick = ()=> window.open(p.url,'_blank','noopener');
+  if (bc) bc.onclick = async ()=>{ try{ await navigator.clipboard.writeText(p.url); toast('已复制','ok'); }catch(e){ toast('复制失败，请手动选中','err'); } };
+}
+
+// showAddDone 建号结果页：专属密钥只在这里明文给一次，以后在「密钥」页看。
+function showAddDone(res){
+  const key = res.account_key || '';
+  $('#addBody').innerHTML = `<div class="card" style="margin:0">
+    <h3 style="margin:0 0 8px">✅ 已添加 ${esc(res.label)}</h3>
+    <div class="kv">
+      <div class="k">uid</div><div class="mono">${esc(res.uid)}</div>
+      <div class="k">专属密钥</div><div class="mono" id="newKey">${esc(key||'（未生成）')}</div>
+    </div>
+    <p class="muted" style="font-size:12px;margin:10px 0">${res.in_pool?'已立即加入账号池。':'已写入文件，稍后自动入池。'}</p>
+    <div class="row"><button id="btnCopyNew">复制密钥</button><span class="spacer"></span><button class="primary" id="btnAddFinish">完成</button></div>
+  </div>`;
+  $('#btnCopyNew').onclick = async ()=>{ try{ await navigator.clipboard.writeText(key); toast('已复制','ok'); }catch(e){ toast('复制失败，请手动选中','err'); } };
+  $('#btnAddFinish').onclick = ()=>{ $('#addModal').classList.add('hide'); route(); };
+}
+
+async function submitPaste(p){
+  let input;
+  const txt = $('#addCred').value.trim();
+  try{ input = txt ? JSON.parse(txt) : {}; }catch(e){ return toast('凭证不是合法 JSON: '+e.message,'err'); }
+  const btn = $('#btnAddSave'); btn.disabled = true; btn.textContent = '保存中…';
+  try{
+    const res = await api('/admin/api/accounts/add', { method:'POST', body:{ provider:p.id, nickname:$('#addNick').value.trim(), input } });
+    showAddDone(res);
+  }catch(e){
+    btn.disabled = false; btn.textContent = '保存并加入账号池';
+    toast(e.message,'err');
+  }
+}
+
+async function startOAuth(p){
+  const btn = $('#btnOAuthStart'); btn.disabled = true; btn.textContent = '请求授权链接…';
+  let r;
+  try{ r = await api('/admin/api/accounts/oauth/start', { method:'POST', body:{ provider:p.id, nickname:$('#addNick').value.trim() } }); }
+  catch(e){ btn.disabled=false; btn.textContent='生成授权链接'; return toast(e.message,'err'); }
+  $('#oauthBox').innerHTML = `
+    <p style="font-size:12px;margin:0 0 6px">1. 在浏览器打开下面的链接并完成登录：</p>
+    <div class="urlbox">${esc(r.auth_url)}</div>
+    <div class="row" style="margin-top:8px">
+      <button id="btnOpenUrl">打开</button><button id="btnCopyUrl">复制链接</button>
+      <span class="spacer"></span><span class="muted" id="oauthState" style="font-size:12px">等待授权…</span>
+    </div>
+    <p class="muted" style="font-size:12px;margin:10px 0 0">2. 登录完成后这里每 3 秒问一次，收到就自动建号。</p>`;
+  $('#btnOpenUrl').onclick = ()=> window.open(r.auth_url,'_blank','noopener');
+  $('#btnCopyUrl').onclick = async ()=>{ try{ await navigator.clipboard.writeText(r.auth_url); toast('已复制','ok'); }catch(e){ toast('复制失败','err'); } };
+  await pollOAuth(r.ticket, 40);
+}
+
+async function pollOAuth(ticket, left){
+  const st = $('#oauthState');
+  if (!st) return; // 弹窗已关闭
+  try{
+    const j = await api('/admin/api/accounts/oauth/status?ticket='+encodeURIComponent(ticket));
+    if (j.status === 'ok'){ showAddDone({ label:j.label, uid:j.uid, account_key:j.account_key, in_pool:true }); return; }
+    if (j.status === 'error'){ st.textContent = '失败：' + (j.error||'未知错误'); st.className='danger'; return; }
+    st.textContent = '等待授权…（' + (41-left) + '/40）';
+  }catch(e){ st.textContent = '轮询失败：' + e.message; st.className='danger'; return; }
+  if (left <= 1){ st.textContent='等待超时，请重新生成链接'; st.className='danger'; return; }
+  setTimeout(()=> pollOAuth(ticket, left-1), 3000);
+}
+
+// ─── 密钥 ───────────────────────────────────────────────────────────
+async function renderKeys(){
+  const v = $('#view');
+  v.innerHTML = '<h2>密钥</h2><div class="card muted">加载中…</div>';
+  let k, accData;
+  try{
+    [k, accData] = await Promise.all([ api('/admin/api/keys?reveal=1'), api('/admin/api/accounts') ]);
+  }catch(e){ v.innerHTML='<h2>密钥</h2><div class="card">'+esc(e.message)+'</div>'; return; }
+
+  // 账号专属密钥：直接以账号列表为骨架（缺密钥的号就显示「生成」），
+  // 不再让用户手填 uid —— 内层 uid 写错就会路由不到该号，是最常见的坑。
+  const accounts = accData.accounts || [];
+  const keyMap = {};
+  accounts.forEach(a=>{
+    keyMap[a.uid] = (k.account_keys && k.account_keys[a.label] && k.account_keys[a.label][a.uid]) || '';
+  });
+  const accRows = accounts.map(a=>{
+    const s = keyMap[a.uid];
+    const dot = a.disabled? 'bad' : (a.cooling? 'warn':'good');
+    const cell = s ? s.slice(0,6)+'…'+s.slice(-4) : '（未生成）';
+    return `<tr>
+      <td><span class="dot ${dot}"></span>${a.disabled?'禁用':(a.cooling?'冷却':'正常')}</td>
+      <td>${providerCell(a)}</td>
+      <td class="mono">${esc(a.label)}</td>
+      <td class="mono" title="${esc(a.uid)}">${esc(a.uid.slice(0,8))}…</td>
+      <td class="mono" data-keycell="${esc(a.uid)}">${esc(cell)}</td>
+      <td class="kv-actions">
+        ${s?`<button data-show="${esc(a.uid)}">显示</button><button data-copy="${esc(a.uid)}">复制</button>`:''}
+        <button data-reset="${esc(a.uid)}">${s?'重置':'生成'}</button>
+        <button data-del-acc="${esc(a.uid)}" data-label="${esc(a.label)}" class="danger">删除账号</button>
+      </td>
+    </tr>`;
+  }).join('');
+  // 只保留「账号专属密钥」：一人一把 key、锁死单号。主密钥 / 区域密钥 /
+  // 供应商密钥仍可改（设置页直编 config.json），页面上不再重复三张输入表。
+  v.innerHTML = `
+    <h2>密钥</h2>
+    <div class="card">
+      <h3>账号专属密钥（锁死单个号）</h3>
+      <table><thead><tr><th>状态</th><th>供应商</th><th>标签</th><th>uid</th><th>专属密钥</th><th>操作</th></tr></thead><tbody>
+        ${accRows||'<tr><td colspan="6" class="muted">没有账号，先去「账号」页添加</td></tr>'}</tbody></table>
+      <p class="muted" style="font-size:12px;margin:10px 0 0">一行就是一个账号：就地生成/重置专属密钥，或删除账号。请求带上某号密钥时只走该号，不参与池内轮换。</p>
+    </div>`;
+
+  // 账号行内操作：显示/复制/重置/删除。数据都来自本次拉取（keyMap），
+  // 操作后直接 renderKeys() 重新拉，保证与磁盘上的 config.json 一致。
+  const cellOf = uid => Array.from(v.querySelectorAll('[data-keycell]')).find(el=> el.dataset.keycell === uid);
+  v.querySelectorAll('[data-show]').forEach(b=> b.onclick = ()=>{
+    const uid = b.dataset.show, cell = cellOf(uid); if (!cell) return;
+    const revealed = b.dataset.on === '1';
+    cell.textContent = revealed ? (keyMap[uid].slice(0,6)+'…'+keyMap[uid].slice(-4)) : keyMap[uid];
+    b.dataset.on = revealed ? '' : '1';
+    b.textContent = revealed ? '显示' : '隐藏';
+  });
+  v.querySelectorAll('[data-copy]').forEach(b=> b.onclick = async ()=>{
+    try{ await navigator.clipboard.writeText(keyMap[b.dataset.copy]||''); toast('已复制','ok'); }
+    catch(e){ toast('复制失败，请手动选中','err'); }
+  });
+  v.querySelectorAll('[data-reset]').forEach(b=> b.onclick = async ()=>{
+    const uid = b.dataset.reset;
+    if (keyMap[uid] && !confirm('重置后旧密钥立即失效，用到它的客户端要换。继续？')) return;
+    b.disabled = true;
+    try{ await api('/admin/api/accounts/'+encodeURIComponent(uid)+'/key',{method:'POST',body:{}}); toast('已生成新密钥','ok'); renderKeys(); }
+    catch(e){ b.disabled = false; toast(e.message,'err'); }
+  });
+  v.querySelectorAll('[data-del-acc]').forEach(b=> b.onclick = async ()=>{
+    if (!confirm('从 auth.json 删除 '+b.dataset.label+'？此操作不可撤销。')) return;
+    b.disabled = true;
+    try{ await api('/admin/api/accounts/'+encodeURIComponent(b.dataset.delAcc),{method:'DELETE'}); toast('已删除','ok'); renderKeys(); }
+    catch(e){ b.disabled = false; toast(e.message,'err'); }
+  });
+}
+
+// ─── 设置 ───────────────────────────────────────────────────────────
+async function renderSettings(){
+  const v = $('#view');
+  v.innerHTML = '<h2>设置</h2><div class="card muted">加载中…</div>';
+  let s;
+  try{ s = await api('/admin/api/settings'); }catch(e){ v.innerHTML='<h2>设置</h2><div class="card">'+esc(e.message)+'</div>'; return; }
+  v.innerHTML = `<h2>设置</h2>
+    <div class="card"><p class="muted" style="margin:0 0 12px;font-size:12px">保存时会把你的改动合并进完整配置并重新校验（重复密钥、非法值会被拒绝）。</p>
+    <textarea id="settingsJson" class="mono" style="width:100%;height:480px;background:#0b0e14;border:1px solid var(--line);border-radius:6px;padding:12px;color:var(--fg);font-size:12px">${esc(JSON.stringify(s,null,2))}</textarea>
+    <div class="row" style="margin-top:12px"><button class="primary" id="btnSaveSettings">保存配置</button>
+      <button id="btnReloadSettings">重新读取</button></div></div>`;
+  $('#btnSaveSettings').onclick = async ()=>{
+    let obj; try{ obj = JSON.parse($('#settingsJson').value); }catch(e){ return toast('JSON 格式错误: '+e.message,'err'); }
+    try{ await api('/admin/api/settings',{method:'POST',body:obj}); toast('已保存。部分项（如 listen）需重启容器生效','ok'); }
+    catch(e){ toast(e.message,'err'); }
+  };
+  $('#btnReloadSettings').onclick = ()=> renderSettings();
+}
+
+// ─── 日志 ───────────────────────────────────────────────────────────
+let logTimer = null, lastSeq = 0;
+async function renderLogs(){
+  const v = $('#view');
+  v.innerHTML = `<h2>日志</h2>
+    <div class="card">
+      <div class="row"><label><input type="checkbox" id="follow" checked> 跟随</label>
+        <span class="spacer"></span>
+        <button id="btnClear">清屏</button></div>
+      <div class="logs" id="logBox" style="margin-top:10px"></div>
+    </div>`;
+  const box = $('#logBox');
+  box.textContent = '';
+  lastSeq = 0;
+  const poll = async ()=>{
+    try{
+      const r = await api('/admin/api/logs?since=' + lastSeq);
+      if (r.lines && r.lines.length){
+        const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+        for (const ln of r.lines){ box.textContent += ln.text + '\n'; }
+        lastSeq = r.max_seq;
+        // 只保留最后 3000 行，避免页面卡死
+        const lines = box.textContent.split('\n');
+        if (lines.length > 3000){ box.textContent = lines.slice(-3000).join('\n'); }
+        if ($('#follow').checked && atBottom) box.scrollTop = box.scrollHeight;
+      }
+    }catch(e){ /* 轮询失败静默，下轮再试 */ }
+  };
+  await poll();
+  if (logTimer) clearInterval(logTimer);
+  logTimer = setInterval(poll, 2000);
+  $('#btnClear').onclick = ()=>{ box.textContent=''; };
+}
+// 切换页面时停掉日志轮询
+window.addEventListener('hashchange', ()=>{ if (logTimer){ clearInterval(logTimer); logTimer = null; } });
+
+// ─── 启动 ───────────────────────────────────────────────────────────
+(async function boot(){
+  try{
+    await api('/admin/api/overview');
+    showApp(); route();
+  }catch(e){
+    showLogin();
+  }
+})();
+</script>
+</body>
+</html>
