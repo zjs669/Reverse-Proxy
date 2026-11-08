@@ -1,55 +1,51 @@
-# ---- 凭证 / 运行时状态：含网关密钥与上游 token，绝不入库 ----
-auths/
-data/
-config.json
+# ---- 凭证 / 运行时状态：绝不上库 ----
+/auths/
+/data/
+/config.json
 config.json.bak.*
+config.json.bak-*
 config.json.testbak
+*.bak-*
 账号令牌清单.md
-# 内部交接文档：含真实 uid、密钥与运维细节，不随开源仓库发布
 交接文档.md
+CLEANUP_PROGRESS.md
+CMD_CLEANUP_HANDOFF.md
 
-# ---- AI 会话/记忆目录（可能含账号标识）----
-.workbuddy/
-.workbuddy-ai/
+# ---- Android 客户端工程：本地构建副本，不随开源仓库发布 ----
+/apk/
 
-# ---- 临时凭证/授权辅助脚本（含真实 token、uid、session）----
-.creds/
-
-# ---- 本地构建产物 ----
+# ---- 本地构建 / 临时产物 ----
 /login
 /credit
 /signin_bin
+/build_out/
+.build_out/
+.staticcheck_bin
 *.exe
 *.log
 *.bak
-*.bak-*
+*.tmp
+*.apk
+*.so.bak
+*.so.bak-*
+
+# ---- AI 会话 / 记忆 / 临时凭证目录 ----
+.workbuddy/
+.workbuddy-ai/
+.creds/
+.screenshots/
 
 # ---- IDE / Python ----
 .idea/
 __pycache__/
 *.pyc
 
-# ---- 本地调试脚本（含使用说明，可能被填入临时凭证，不入库）----
+# ---- 本地调试脚本（可能被填入临时凭证，不入库）----
 deepseek.py
 deepseek_vision.py
 0.py
 sha3_wasm_bg.wasm
 
-# ---- 本地截图 ----
-.screenshots/
-
 # ---- 测试环境本地覆盖：容器名/端口与生产不同，入库会让生产误改名换端口 ----
 docker-compose.override.yml
 docker-compose.override.yaml
-
-# ---- 设备备份（含真实 token）与本地构建产物 ----
-apk/*-backup-*/
-.build_out/
-
-# 内部交接文档（含真实 uid/密钥说明，不随开源仓库发布）
-CLEANUP_PROGRESS.md
-CMD_CLEANUP_HANDOFF.md
-.staticcheck_bin
-
-# Android 客户端工程不在本仓库发布
-apk/

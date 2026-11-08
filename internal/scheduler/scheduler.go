@@ -242,7 +242,11 @@ func (s *Scheduler) CheckinOne(a *auth.Auth) upstream.CheckinResult {
 	case upstream.CheckinOK:
 		log.Printf("checkin %s: +%d（连签 %d 天）", logfmt.UID8(a.UID), res.Credit, res.StreakDays)
 	case upstream.CheckinAlready:
-		log.Printf("checkin %s: 今日已签", logfmt.UID8(a.UID))
+		if res.Msg != "" {
+			log.Printf("checkin %s: %s", logfmt.UID8(a.UID), res.Msg)
+		} else {
+			log.Printf("checkin %s: 今日已签", logfmt.UID8(a.UID))
+		}
 	case upstream.CheckinUnsupported, upstream.CheckinPending:
 		// 没有签到体系 / 接口待接入：静默，避免每天刷无意义日志
 	case upstream.CheckinFailed:

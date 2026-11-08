@@ -883,7 +883,11 @@ type qoderCampaignsResp struct {
 
 // qoderSashCall 发一次 /sash 请求。
 //
-// 与 qoderAlgoCall 的区别：/sash 面**不需要 COSY 签名**，只要 Bearer token。
+// /sash 面不需要 COSY 签名，但**必须带 cosy-* 身份头**：
+// 只发 Bearer 时上游把请求判成「无活动页」，campaigns 返回
+// showCampaign=false / campaigns=[]，签到会被误判成「今日已签」。
+// 实测必需的最小集合：clienttype、version、machineid、machinetoken；
+// 其余头一并带上，与客户端抓包对齐。指纹取账号自己的 extra。
 func (p *qoderProvider) qoderSashCall(c *Client, a *auth.Auth, method, path string) (int, []byte, error) {
 	rawURL := qoderOpenAPI(a) + path
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -892,9 +896,31 @@ func (p *qoderProvider) qoderSashCall(c *Client, a *auth.Auth, method, path stri
 	if err != nil {
 		return 0, nil, err
 	}
+	region := qoderRegion(a)
+	ver := "0.4.11"
+	ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) QoderCN/0.4.11 Chrome/150.0.7871.114 Electron/43.1.1 Safari/537.36"
+	if region == "intl" {
+		ver = "0.5.3"
+		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Qoder/0.5.3 Chrome/150.0.7871.114 Electron/43.1.1 Safari/537.36"
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(a.AccessToken))
-	req.Header.Set("User-Agent", "Qoder/0.5.3")
+	req.Header.Set("User-Agent", ua)
+	req.Header.Set("Origin", qoderOpenAPI(a))
+	req.Header.Set("Referer", qoderOpenAPI(a)+"/growth-page/activity-iframe")
+	req.Header.Set("Accept-Language", "zh-CN")
+	req.Header.Set("cosy-clienttype", "10")
+	req.Header.Set("cosy-version", ver)
+	req.Header.Set("cosy-machineos", "x86_64_win32")
+	if v := strings.TrimSpace(a.ExtraVal("machineID")); v != "" {
+		req.Header.Set("cosy-machineid", v)
+	}
+	if v := strings.TrimSpace(a.ExtraVal("machineToken")); v != "" {
+		req.Header.Set("cosy-machinetoken", v)
+	}
+	if v := strings.TrimSpace(a.ExtraVal("machineType")); v != "" {
+		req.Header.Set("cosy-machinetype", v)
+	}
 	if method == http.MethodPost {
 		// 领取是空 body，但必须显式给 Content-Length: 0，
 		// 否则部分网关会把 POST 当成无体请求拒绝。
@@ -937,32 +963,26 @@ func (p *qoderProvider) Checkin(c *Client, a *auth.Auth) (CheckinResult, error) 
 		return CheckinResult{State: CheckinFailed, Msg: "活动列表解析失败: " + err.Error()}, nil
 	}
 
-	// claimable=false：零可领项。
-	//
-	// 这**不代表「今天已领」**——也可能该账号压根没有活动（showCampaign=false）。
-	// 两者对调度器处置一致（今天不用再试），所以都归 Already，
-	// 但文案要说清是「没有可领」，不谎称「已签到」。
-	if !list.Claimable || len(list.Campaigns) == 0 {
+	// 空列表才说明真的没有活动可领。claimable 只是上游的聚合标记，
+	// 实测 claimable=false 时 campaigns[] 仍可能有项且 POST claim 返回 200，
+	// 所以不能用 claimable 当唯一门槛，否则会跳过 claim 直接谎报「已签到」。
+	if len(list.Campaigns) == 0 {
 		msg := "当前没有可领取的活动"
 		if !list.ShowCampaign {
 			msg = "该账号当前无活动（showCampaign=false）"
 		}
-		return CheckinResult{State: CheckinAlready, Msg: msg}, nil
+		return CheckinResult{State: CheckinUnsupported, Msg: msg}, nil
 	}
 
-	// 优先挑 claimStatus==CLAIMABLE 的。
-	var target *qoderCampaign
+	// 取第一项活动的 campaignId 发起 claim。上游用 replayed 区分
+	// 「本次真领到」与「之前领过」，两种都是 200，由下面的响应判据处理。
+	// 优先挑 claimStatus==CLAIMABLE 的，没有就退回第一项。
+	target := &list.Campaigns[0]
 	for i := range list.Campaigns {
 		if strings.EqualFold(list.Campaigns[i].ClaimStatus, claimStatusClaimable) {
 			target = &list.Campaigns[i]
 			break
 		}
-	}
-	if target == nil {
-		return CheckinResult{
-			State: CheckinAlready,
-			Msg:   fmt.Sprintf("有 %d 个活动但均不可领", len(list.Campaigns)),
-		}, nil
 	}
 	id := strings.TrimSpace(target.CampaignID)
 	if id == "" {
