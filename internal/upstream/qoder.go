@@ -858,18 +858,25 @@ const (
 	// 客户端靠它决定头像是否显示红点。诊断时一起打，便于交叉确认。
 	qoderNotificationsPath = "/sash/api/v1/me/notifications"
 
-	// claimStatusClaimable campaigns[].claimStatus 的可领取取值。
-	claimStatusClaimable = "CLAIMABLE"
+
 )
 
 // qoderCampaign 活动项。只取判定与领取必需的字段。
 type qoderCampaign struct {
 	CampaignID  string `json:"campaignId"`
 	CampaignKey string `json:"campaignKey"`
-	ClaimStatus string `json:"claimStatus"` // CLAIMABLE / CLAIMED / EXPIRED / INELIGIBLE
+
 	StartAt     int64  `json:"startAt"`
 	EndAt      int64  `json:"endAt"`
 	ActionType  string `json:"actionType"`
+
+	// Benefit 只有「可领取」类活动才有。实测同一账号的 campaigns 里会混入
+	// actionType=VIEW_DETAILS 的推广弹窗（如「首购订阅加赠 Credits」），
+	// 它没有 benefit、点了只是跳转订阅页，不能当签到目标。
+	Benefit *struct {
+		Kind   string  `json:"kind"`
+		Amount float64 `json:"amount"`
+	} `json:"benefit"`
 }
 
 // qoderCampaignsResp 列表响应。
@@ -883,11 +890,16 @@ type qoderCampaignsResp struct {
 
 // qoderSashCall 发一次 /sash 请求。
 //
-// /sash 面不需要 COSY 签名，但**必须带 cosy-* 身份头**：
-// 只发 Bearer 时上游把请求判成「无活动页」，campaigns 返回
-// showCampaign=false / campaigns=[]，签到会被误判成「今日已签」。
-// 实测必需的最小集合：clienttype、version、machineid、machinetoken；
-// 其余头一并带上，与客户端抓包对齐。指纹取账号自己的 extra。
+// 与已验证可用的精简脚本对齐：只需 4 个头——
+//   user-agent / authorization / cosy-clienttype / cosy-version /
+//   cosy-machineos / cosy-machinetoken
+// 实测：只发这 4 个 cosy 头即可让 campaigns 返回 showCampaign=true 与活动列表；
+// 只发 Bearer 会被上游判成「无活动页」（campaigns=[]），导致签到误报「今日已签」。
+// machineid / machinetype / Origin / Referer / Accept-Language 均非必需（实测无差异）。
+//
+// cosy-machinetoken 是 COSY 设备机器指纹，不是账号标识。取账号 extra.machineToken：
+// 建号时由 genMachineFingerprint 随机生成（base64url 的两个 UUID），用户用 {"pat":...} 建号
+// 时无需手填。换成官方客户端 machine_token.json 里的 token 也等价可用。
 func (p *qoderProvider) qoderSashCall(c *Client, a *auth.Auth, method, path string) (int, []byte, error) {
 	rawURL := qoderOpenAPI(a) + path
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -906,20 +918,11 @@ func (p *qoderProvider) qoderSashCall(c *Client, a *auth.Auth, method, path stri
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(a.AccessToken))
 	req.Header.Set("User-Agent", ua)
-	req.Header.Set("Origin", qoderOpenAPI(a))
-	req.Header.Set("Referer", qoderOpenAPI(a)+"/growth-page/activity-iframe")
-	req.Header.Set("Accept-Language", "zh-CN")
 	req.Header.Set("cosy-clienttype", "10")
 	req.Header.Set("cosy-version", ver)
 	req.Header.Set("cosy-machineos", "x86_64_win32")
-	if v := strings.TrimSpace(a.ExtraVal("machineID")); v != "" {
-		req.Header.Set("cosy-machineid", v)
-	}
 	if v := strings.TrimSpace(a.ExtraVal("machineToken")); v != "" {
 		req.Header.Set("cosy-machinetoken", v)
-	}
-	if v := strings.TrimSpace(a.ExtraVal("machineType")); v != "" {
-		req.Header.Set("cosy-machinetype", v)
 	}
 	if method == http.MethodPost {
 		// 领取是空 body，但必须显式给 Content-Length: 0，
@@ -974,15 +977,33 @@ func (p *qoderProvider) Checkin(c *Client, a *auth.Auth) (CheckinResult, error) 
 		return CheckinResult{State: CheckinUnsupported, Msg: msg}, nil
 	}
 
-	// 取第一项活动的 campaignId 发起 claim。上游用 replayed 区分
-	// 「本次真领到」与「之前领过」，两种都是 200，由下面的响应判据处理。
-	// 优先挑 claimStatus==CLAIMABLE 的，没有就退回第一项。
-	target := &list.Campaigns[0]
+	// 只挑真正的「领取」活动：actionType=CLAIM_BENEFIT 且带 benefit。
+	//
+	// 不能直接取 campaigns[0]：实测同一账号的列表里会混入 actionType=VIEW_DETAILS
+	// 的推广弹窗（「限时福利！Lite/Pro/Pro+ 首购订阅加赠 Credits」），它没有 benefit、
+	// 点了只跳转订阅页。若排在第一位就会签错活动——POST 返回 replayed=true 但零到账，
+	// 表现为「签到失败」。这就是国际版某账号签到不了的根因。
+	//
+	// 不按 claimStatus / claimable 预筛：实测列表里全是 CLAIMED、claimable=false，
+	// 但 POST claim 仍返回 200 + replayed（幂等），预筛会误报「已签到」。
+	var target *qoderCampaign
 	for i := range list.Campaigns {
-		if strings.EqualFold(list.Campaigns[i].ClaimStatus, claimStatusClaimable) {
-			target = &list.Campaigns[i]
-			break
+		c := &list.Campaigns[i]
+		if !strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") {
+			continue
 		}
+		if c.Benefit == nil || c.Benefit.Amount <= 0 {
+			continue
+		}
+		target = c
+		break
+	}
+	if target == nil {
+		// 没有可领取活动：可能是今天已领完、或该账号只有推广类活动。
+		return CheckinResult{
+			State: CheckinUnsupported,
+			Msg:   "当前没有可领取的签到活动（仅推广类活动或今日已领）",
+		}, nil
 	}
 	id := strings.TrimSpace(target.CampaignID)
 	if id == "" {
