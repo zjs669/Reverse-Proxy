@@ -1,0 +1,430 @@
+# 多供应商接入指南（PROVIDERS.md）
+
+> **来源**：本仓库是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的魔改分支（后者源自已删库的 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，MIT 协议）。本文件描述的是本仓库**新增的多供应商层**；CodeBuddy 原有链路的协议细节请参考上游文档。
+
+
+`Reverse-Proxy` 在原有 CodeBuddy 反代基础上，扩展了 **Provider 抽象层**，支持在**同一网关**里同时挂多个上游供应商：
+
+| provider | 上游 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| `codebuddy` | copilot.tencent.com / codebuddy.ai | ✅ 已支持 | 默认回落目标，无需显式配置 |
+| `trae` | trae-api-cn.mchost.guru（国内版） | ✅ 已支持 | chat_v3 协议，SSE 事件 `output`/`done`/`[DONE]` |
+| `qoder` | gateway.qoder.com.cn（国内版） | ✅ 已支持 | COSY 私有协议 + 换表编码 + 嵌套 SSE，HTTP/1.1 强制 |
+| `deepseek` | chat.deepseek.com（DeepSeek 网页版） | ✅ 已支持（**仅对话**） | Bearer userToken + 每请求 PoW + 会话树上下文；**不支持 Function Calling** |
+
+> Qoder 上游对 HTTP/2 的 SSE 会返回 `INTERNAL_ERROR`，网关已为 Qoder 单独禁用 HTTP/2 协商（`Client.QoderHTTP`，`TLSNextProto` 置空）。
+>
+
+---
+
+## 1. 账号密钥模型（仅 account_keys）
+
+网关**没有**主密钥、**没有**区域密钥、也**没有**供应商密钥——鉴权完全由 `account_keys` 一张表驱动：
+（`internal/server/handler.go` 的 `withAuth` 规定：**只要** `account_keys` 非空就鉴权；表为空才放行。当前配置里该表非空，所以必须带有效密钥才能调用。）
+
+**账号密钥 `account_keys`** — 嵌套结构 `{名字: {uid: 密钥(secret)}}`：
+- **外层「名字」**是展示用标签（与 `auth.json` 的账号标签对应，如 `qoder_1` / `codebuddy_2`，也可自定义为任意好记的名字）；
+- **内层 `{uid: secret}`** 是一个账号一把专属密钥。带该密钥的请求**锁死**到内层 uid 对应的那一个账号（不参与轮换、不会回退到池中其他号）。
+
+唯一的「连接」是：内层的 **uid** 必须等于 `auth.json` 里某账号的 `uid` 字段（外层名字仅给人看，池仍按 uid 关联）。
+
+> 也就是说：`account_keys` 的密钥（如 `qoder_1` 下 `<qoder-uid>…→762c97…`）只能走**那一个** qoder 账号；要用别的账号就换对应的密钥。
+
+### config.json 示例
+
+```jsonc
+{
+  // ↓↓↓ 账号级密钥：{名字: {uid → 专属密钥}}（锁死单账号）↓↓↓
+  "account_keys": {
+    "qoder_1":     { "<qoder-uid>": "<qoder-key>…（qoder 专属）" },
+    "trae_1":      { "<trae-uid>": "<trae-key>…（trae 专属）" },
+    "codebuddy_1": { "<codebuddy-uid>-…": "<cb1-key>…（codebuddy_1 专属）" },
+    "codebuddy_2": { "<codebuddy-uid>-…": "<cb2-key>…（codebuddy_2 专属）" }
+  }
+}
+```
+
+校验规则（`cmd/server/config.go` `normalize`）：
+- 每个内层密钥（secret）不能为空，且**全局唯一**——同一把密钥不得出现在两个账号下（启动报错）。
+- normalize 遍历 `{名字: {uid: secret}}` 生成反向索引 `AccountKeyToUID`（secret → uid），供 `withAuth` 快速反查锁号。
+
+---
+
+## 2. 凭证文件（auths/auth.json 单文件）
+
+各供应商凭证**如何获取**见下面 §2.1–§2.4 各小节（统一用 `./login <provider> <region> <昵称>` 向导或手填）。
+
+所有账号集中存放在**单个文件** `auths/auth.json`（由 `config.json` 的 `auth_file` 指向），顶层是一张 map，**键即账号标签**：
+
+```jsonc
+{
+  "qoder_1":      { "provider":"qoder", "uid":"<qoder-uid>-…", "nickname":"…", "accessToken":"dt-…", "refreshToken":"drt-…", "expiresAt":…, "extra":{…} },
+  "trae_1":       { "provider":"trae",  "uid":"<trae-uid>", "nickname":"…", "accessToken":"eyJ…", "extra":{…} },
+  "codebuddy_1":  { "account":{…}, "auth":{…} },   // 嵌套形同样兼容
+  "codebuddy_2":  { "account":{…}, "auth":{…} },
+  "codebuddyai_1":{ "provider":"codebuddy", "uid":"…", "region":"intl", … }  // 国际版多 ai 前缀
+}
+```
+
+**键命名规则**（由 `cmd/login` 向导自动生成，也可手填）：
+- 形如 `<provider>_<n>`，序号自动顺延（`qoder_1` / `qoder_2` …）。
+- 国际版 CodeBuddy 前缀为 **`codebuddyai_`**（比国内版多 `ai` 两字），其余照常。
+- `nickname` 字段可自由设置、不校验，仅用于展示（如客户端列表、日志）。
+
+`config.json` 设置：`"auth_file": "./auths/auth.json"`（旧版 `auth_dir` 多文件模式已废弃）。网关启动时 `LoadFile` 读入整张 map，按每个账号内部的 `uid` 编入账号池；token 刷新时 `SaveAtomic` **只原子回写这一个条目**，不打扰其他账号。
+
+每个供应商的账号 JSON 形态（均兼容嵌套形 `{"auth":{...},"account":{...}}` 与扁平形）：
+
+### 2.1 Trae（provider="trae"）
+
+> **国内版 / 国际版是两套独立体系。** 本节前半部分讲通用形态，国际版差异见
+> [2.1.1](#211-trae-国际版traeai)。
+
+```jsonc
+{
+  "provider": "trae",
+  "accessToken": "Cloud-IDE-JWT 的 JWT 原文（可由 sourceId 铸出来，不必手粘）",
+  "refreshToken": "可选：Trae refresh token（ExchangeToken 兜底路，未经验证）",
+  "expiresAt": 1793782411,     // 由 JWT 的 exp 自动写入，不手填
+  "uid": "X-Uid（← JWT data.id，自动解析）",
+  "nickname": "我的trae",
+  "extra": {
+    "appId": "",        // 留空用内置 traeAppID
+    "appVersion": "",   // 留空用内置 traeAppVersion
+    "sourceId": "**长期凭证**：JWT payload.data.source_id = 请求头 X-Cloudide-Session（续期靠它）"
+  }
+}
+```
+
+**最少 JSON**：`{"sourceId":"<X-Cloudide-Session 的值>"}` —— **只给登录会话标识就够了**，
+向导会拿它向 `GetUserToken` 铸一枚新 JWT 再入库（`uid ← data.id`、`expiresAt ← exp`、
+`extra.sourceId` 全部自动解析）。也可依旧粘 JWT：`{"accessToken":"<Cloud-IDE-JWT 原文>"}`。
+
+- **请求头**（2026-11-04 逐头拆分实测，只留一个头发出去）：
+  - **`Authorization: Cloud-IDE-JWT <jwt>` —— 对话/模型目录接口真正必需的只这一项**。
+    只带它（无 Token/Session/Uid 头）拉目录与跑对话都是 200；少了它就统一 401 / code `1001`。
+  - `X-Cloudide-Token: <jwt>` ← 与 `accessToken` 同源；**单独不能代替 Authorization**（目录接口 401）。
+  - `X-Uid: <uid>` ← 账号标识；实测可缺省，网关仍然携带（部分接口会用它定位账号）。
+  - `X-Cloudide-Session: <source_id>` ← **续期接口的必需凭证**（对话侧实测可缺省，网关照旧携带）。
+    取值优先级：`extra.sourceId`（显式覆盖）→ 从当前 `accessToken` 自动解析。
+    不存死的原因是：同一个登录会话里 source_id 不变（实测），但**重新登录/换设备会变**，
+    存死会拿着上一个会话的 id 打上游。`login` 向导会把解析结果写进 `extra.sourceId`，
+    方便肉眼核对（也是 JWT 已丢/过期时的取值来源）。
+- 模型名需带 `__dev` 后缀（网关自动补全）；`messages[].content` 必须是 `parts` 数组。
+- **`expiresAt` 由 login 向导自动从 JWT 的 `exp` 解析写入**（无需手填）。JWT 寿命 **8h**，
+  但过期后**不需要人工重登**：见下面「两层令牌模型」。
+- **两层令牌模型（2026-11-04 逐头发实测，推翻了旧结论）**——`GetUserToken` 返什么：
+
+  | 发什么 | 拿回什么 |
+  |---|---|
+  | 只发 `X-Cloudide-Session`（无 JWT、无 `X-Uid`） | 200，**新铸 JWT，exp = now + 8h** ✅ |
+  | `X-Cloudide-Session` + `X-Uid` | 200，同上 |
+  | 只发 `X-Cloudide-Token: <未过期 JWT>` | 200，但是**同一枚令牌原样回显**（exp 不推后 → 不续命） |
+  | 只发 `X-Cloudide-Token: <过期 JWT>` | 401 / code `20101` Token 无效 |
+  | 把 source_id 放 `X-Cloudide-Token`（头名错） | 401 / `20101` |
+  | 只给 `X-Uid` | 401 / `20101` |
+
+  两个关键结论：① **`source_id` 是 Trae 唯一的长期凭证**（浏览器好几天不打开也免验证就是靠它）；
+  ② **拿 JWT 自身续期是错觉**——未过期时只回显、过期后直接 401，所以旧版只发
+  `X-Cloudide-Token` 的实现“刷新成功”其实一点命也没续上（网关现在两个头都发，会话必带）。
+  看护每 10m 巡检，剩 2h（`refresh_window_by_provider.trae`）就靠会话铸新令牌；
+  即使停机过夜、令牌已过期，启动后也能自救（实测：过期 13h43m 的号启动即续回 8h）。
+  真正需要手工的只剩一种：**会话本身失效**（在别的设备登出）→ 重粘一份 `X-Cloudide-Session`。
+- **已知现象**：Trae 上游对新账号/免费档可能直接返回"exceeded the rate limit"作为正常 SSE chunk（非 HTTP 429）。这是账号侧限流，不是网关问题；换账号或等冷却后可正常对话。
+- **Token 获取**：管理台「+ 添加账号 → Trae」粘 `sourceId` 或 `accessToken`，**要选区域**（国内 trae.cn / 国际 trae.ai）。`sourceId` 与 `accessToken` 任给一个即可；同 uid 的续期会**覆盖原槽位**（不会长出 `trae_2`），`account_keys` 里的密钥沿用不覆盖。
+- ⚠️ Trae 的兜底刷新路径（ExchangeToken）细节仍未经验证；主路径 GetUserToken 已实机验证（见上）。
+
+#### 2.1.1 Trae 国际版（trae.ai）
+
+国际版与国内版**域名、认证头、请求体格式、积分接口全都不同**，靠 `extra.region` 区分。
+账号标签也不一样：国内是 `trae_N`，国际是 `traeai_N`（由 `provision.KeyPrefix` 按区域生成），
+这样在管理台和 `account_keys` 里一眼能看出打的是哪家。
+
+```jsonc
+{
+  "provider": "trae",
+  "accessToken": "网页版 JWT（必须带 data.source_id）",
+  "expiresAt": 1793874419,          // 自动解析，不手填
+  "domain": "www.trae.ai",
+  "uid": "<trae-intl-uid>",
+  "nickname": "trae-intl",
+  "extra": {
+    "region": "intl",              // ★ 必须写，否则按国内版打到 api.trae.cn，全部 404/401
+    "sourceId": "<续期唯一凭证，必须存>"   // ★ 丢了就只能重新登录
+  }
+}
+```
+
+**为什么必须用网页版 JWT**：客户端 JWT（`%USERPROFILE%\.trae\trae-jwt-token`）
+没有 `data.source_id`，寿命 7 天但过期后无法自助续期，且调积分接口返回 `401 code=4014`。
+网页版 JWT 只有 3 小时，但配上 `sourceId` 就能无限次换新。
+
+| 项 | 国内版 | 国际版 |
+|---|---|---|
+| 换 token | `api.trae.cn` | `api.trae.ai` |
+| 对话 / 模型 | `trae-api-cn.mchost.guru` | `coresg-normal.trae.ai` |
+| 积分 | `api.trae.cn/trae/api/v2/…` | `ug-normal.trae.ai/trae/api/v1/…` |
+| `messages[].content` | 字符串 | **数组** `[{type,text}]` |
+| 模型名 | 无 `__dollar` | 常只有 `__dollar__dev`，需剥掉 |
+
+签名侧另有一处差异：**签到**走的是 `api.trae.cn`（国内），而不是对话域 `trae-api-cn.mchost.guru`，
+且请求头必须带一个纯数字的 `x-device-id`。
+
+三个坑：
+
+1. 积分端点带 `current`：`user_current_entitlement_list`（少了 404）
+2. 对话 `content` 必须是数组，传字符串报 `4001 cannot unmarshal string`
+3. `__dollar` 必须剥掉（`gpt-5.2__dollar__dev` → `gpt-5.2__dev`），否则 `4001 param is invalid`
+
+完整实测记录（最小请求头、响应字段位置、积分换算、排除掉的误判）见
+
+
+### 2.2 Qoder（provider="qoder"）
+
+```jsonc
+{
+  "provider": "qoder",
+  "accessToken": "dt-（deviceToken，COSY 对话网关的 Bearer；PAT 兑换的 jt- 不适用于对话网关）",
+  "refreshToken": "drt-（deviceToken refresh，~1 年轮换）",
+  "expiresAt": 0,
+  "uid": "Qoder 账号标识（任意唯一值）",
+  "nickname": "qoder-1",
+  "extra": {
+    "machineID": "COSY 机器指纹 ID",
+    "machineToken": "COSY 机器指纹 Token（RawURLEncoding）",
+    "machineType": "COSY 机器类型"
+  }
+}
+```
+
+**最少 JSON**（二选一）：
+- PAT 路线（最简，login 自动兑换 jobToken、生成机器指纹、兜底 uid，PAT 自动进 `extra.pat` 供续期）：`{"pat":"pt-…"}`
+- 设备流路线（uid 也可省，机器指纹自动生成）：`{"accessToken":"dt-…","refreshToken":"drt-…"}`
+
+> ⚠️ PAT 兑换出的 `jt-` 只对 OpenAPI 有效，**对话网关实测会拒（`105 Login expired`）**——见 §6。对话稳定可用的仍是真设备流 `dt-`。
+
+- COSY 请求签名需要持久机器指纹（`machineID`/`machineToken`/`machineType`），缺一不可（`NewCosySession` 缺任一直接报错）。
+- 上游：Gateway `gateway.qoder.com.cn`（对话/模型）、OpenAPI `openapi.qoder.com.cn`（drt 刷新）。
+- ⚠️ **PAT(pt-) → jobToken(jt-) 不能用于对话网关**：`jt-` 只对 `openapi.qoder.com.cn`（OpenAPI）有效；**对话网关 `gateway.qoder.com.cn` 只认设备令牌 `dt-`，喂 `jt-` 会被拒并返回 `105 Login expired`**。因此 `accessToken` 必须是设备流拿到的真 `dt-`，不是 PAT 兑换的 `jt-`。
+- **怎么拿 `dt-`/`drt-`**：Qoder CN 客户端登录时自动走设备授权流。令牌存于 `~/.qoder-cn/credentials/auth.json`（AES-GCM + 系统绑定，**无法离线解密，不要直接读**）；实测可取的两处：**机器指纹**明文在 `~/.qoder-cn/shared_client/cache/machine_token.json`（`id`/`token`/`type` → `extra.machineID`/`machineToken`/`machineType`）；**`dt-`/`drt-`** 由客户端进程实时持有在内存（同账号只读扫描 `dt-`/`drt-` 前缀取）。令牌会轮换（`dt-` 约 30 天），写入后设合理 `expiresAt`。或走设备授权 URL `https://qoder.cn/device/selectAccounts?...` 浏览器登录后轮询取得。
+
+### 2.3.1 Qoder 凭证失效与自动续期（2026-11-02 修复）
+
+**现象**：qoder 账号 `last_success` 正常、`disabled=false`，但对话请求挂死（流式永不结束）或 180s 后 502。
+
+**根因（两个叠加的 bug）**：
+
+1. **上游鉴权失败藏在 SSE 里，不在 HTTP 状态码**。上游返回 `HTTP 200` + 一帧（`code` 在 **body 内部**，不在顶层）：
+
+   ```text
+   data:{"headers":{...},"body":"{\"code\":\"105\",\"message\":\"Login expired\"}","statusCodeValue":403,"statusCode":"FORBIDDEN"}
+   ```
+
+   旧解析只判顶层 `code`，于是把错误帧当正常 chunk 透传 → 客户端永远等不到 `[DONE]`，请求挂到超时。
+
+2. **`expiresAt` 写成了 `farFuture`（2100 年）**。`login` 的手填 `dt-/drt-` 分支写 `farFuture`，导致 `NeedsRefresh` 永远为 false，token watch 从不刷新 → `dt-` 一过期该号就永久 `Login expired`，且没有任何日志。
+
+**修复**：
+
+- `ParseNestedSSE` 同时判顶层 `code` 与 body 内嵌错误（`qoderFrameBizError`）；正常帧靠 `choices` 字段区分，不会误判。
+- `ChatStream` 先读首帧探活：命中 105/403 → 用 `drt-`/`pat` 自动续期 → 重试一次。**注意不能用 `bufio.Peek(4096)`**：`Peek(n)` 会阻塞到读满 n 字节或 EOF，而错误帧只有约 150 字节且上游不关连接，会直接挂死。必须 `ReadString` 读首行再拼回流头。
+- `login qoder` 手填 `dt-/drt-` 时写 30 天估算过期（`dt-` 实测寿命约 30 天），不再写 `farFuture`。
+- 流式终帧只在**上游没发过** `finish_reason` 时补发，避免客户端收到两个 `stop`。
+
+**运维提示**：日志出现 `[qoder] uid=xxx 凭证已自动续期（触发原因：Login expired）` 属正常自愈；若出现 `凭证失效且无 drt-/pat，无法自动续期`，需重新 `./login qoder <昵称>`（建议走 PAT 路线，PAT 长期有效）。
+
+---
+
+---
+
+### 2.4 DeepSeek（provider="deepseek"）
+
+```jsonc
+{
+  "provider": "deepseek",
+  "uid": "deepseek-1",              // 任意唯一标识；也可直接填账号 UUID
+  "nickname": "deepseek-1",
+  "accessToken": "<userToken>",     // 必需
+  "expiresAt": 1796200000,
+  "extra": {
+    "device_id": "<uuid>"           // 可选，缺省用进程内随机值
+  }
+}
+```
+
+**最少 JSON**：`{"accessToken":"<userToken>"}` —— 鉴权只需 `Authorization: Bearer <userToken>`；`x-device-id` 实测可缺省。
+
+> **不收集 Cookie**：浏览器 Cookie 实测非必需，`login` 只写 `accessToken`（可选 `device_id`），不保存任何会话凭证。
+
+**userToken 获取（授权登录需要什么）**：
+
+只需要**一样东西**：浏览器登录态里的 `userToken`。三种取法任选其一：
+
+| 方式 | 操作 | 拿到的形态 |
+|---|---|---|
+| A. localStorage（最稳） | 登录 `https://chat.deepseek.com` → F12 → Application → Local Storage → 选中该域名 → 找 `userToken`，值是 `{"value":"<token>","__version":"0"}`，**复制 `value` 字段** | `mb5+...` 开头的 64 字符串 |
+| B. Network 抓包 | F12 → Network → 任选一个 `/api/v0/` 请求 → Request Headers → `Authorization: Bearer <token>`，复制 Bearer 后面那串 | 同上 |
+| C. 一条命令自查 | 已登录页面 Console 执行 `JSON.parse(localStorage.userToken).value` | 同上 |
+
+拿到后执行 `./login deepseek <昵称>`，粘贴下面任一形态（脚本自动归一，不用手改字段）：
+
+```jsonc
+{ "accessToken": "mb5+..." }                                    // 最简
+{ "userToken": { "value": "mb5+...", "__version": "0" } }        // 直接粘 localStorage 原文
+{ "token": "mb5+...", "id": "<账号UUID>" }                       // 直接粘 users/current 响应片段
+```
+
+**不需要**：Cookie、密码、短信验证码、任何 API Key。
+
+> 网关**不收集、不保存任何 Cookie**：DeepSeek 鉴权只认 `Authorization: Bearer <userToken>`，浏览器 Cookie 实测非必需，因此 `login` 只写入 `accessToken`（可选 `device_id`）。
+
+**有效期**：`userToken` 是不透明的 48 字节串，无内嵌过期时间，实测长期有效；失效表现为上游 `code=40003`，网关会禁用该号并提示重登。重新执行同一条 `./login deepseek <昵称>` 覆盖即可（键名固定 `deepseek_1`，不会无限增长）。
+
+
+**协议要点**（`internal/upstream/deepseek.go`，2026-11-02 浏览器抓包实测）：
+- 新建会话：`POST /api/v0/chat_session/create` body `{}` → `chat_session.id`（UUID）+ `ttl_seconds=259200`（**3 天**）。
+- 对话：`POST /api/v0/chat/completion`，body 为 `{chat_session_id, parent_message_id, model_type, prompt, ref_file_ids, thinking_enabled, search_enabled, action, preempt}`。
+- **PoW 必需且一次性**：先 `POST /api/v0/chat/create_pow_challenge` 拿 challenge，用官方 `sha3_wasm_bg.wasm` 的 `wasm_solve` 求解，base64(JSON) 放 `x-ds-pow-response` 头。同一个头复用第二次返回 `40301`，所以**每个请求都要重解**（实测 difficulty=144000，wazero 下约 40ms）。wasm 已内嵌进二进制（`internal/upstream/sha3_wasm_bg.wasm`，`//go:embed`）。
+  - **wasm 只编译一次、实例池化复用**：`CompileModule` 走 `sync.Once`，实例由 `deepseekPowPool` 复用，不再每请求 `InstantiateModule`（那会重建 4MB 线性内存，与求解本身同量级开销）。因 wasm 的 bump allocator 只增不减，单实例累计分配超过 1MB 即回收重建，避免线性内存无限增长。
+- **会话上下文靠上游会话树**：`chat_session_id` 固定 + `parent_message_id` 传上轮的 `response_message_id`（2/4/6…），上游自动带全部前文。首轮 `parent_message_id` 必须 `null`（传 `0` 报 `biz_code 26`）。
+- **错误恒 HTTP 200**：真实状态在 body 信封里 —— `code`（40003 token 失效 / 40300 缺 PoW / 40301 PoW 无效 / 40029 IP 限制 / 40012 封号 / 50006 禁言）、`data.biz_code`（1 会话不存在 / 26 消息 id 无效 / 15 思考额度超限）。网关的 `Classify` 先判信封、再按状态码兜底。
+- **SSE 有两种正文增量帧**，必须都处理：带路径的 `{"p":"response/fragments/-1/content","o":"APPEND","v":"..."}` 与**裸帧** `{"v":" How"}`（无 `p` 字段）。首帧 `{"v":{"response":{...}}}` 是全量**前缀快照**（例如回答 `8642` 时快照是 `864`），后续增量在其后追加 —— 只输出增量会丢前缀，全量重发会重复。
+- 模型：`model_type ∈ default / expert / vision`（浏览器 `settings?scope=model` 的 `model_configs`；当前账号只有 `default` 的 `switchable=true`，故 `/v1/models` 只列出 `deepseek-instant`）。
+- **深度思考与联网搜索默认都开启**（`thinking_enabled=true` + `search_enabled=true`）：
+  - 思考开启后 SSE 多 `THINK` 片段，网关映射为 OpenAI 的 `reasoning_content`（流式与非流式都带）。
+  - 搜索默认开是跟网页版前端对齐（`settings` 里 `search_state_on_launch="on"`）；上游错误码里**没有**「搜索与思考互斥」，只有 search/thinking 与**文件**互斥（`SEARCH_CANNOT_WITH_FILE` / `THINKING_CANNOT_BE_WITH_FILE`），本实现不传 `ref_file_ids`，因此可安全并存。
+  - 关闭方式（请求体顶层）：`{"thinking": false}` 或 `{"thinking_enabled": false}` 关思考；`{"search": false}` 或 `{"search_enabled": false}` 关搜索；`{"reasoning_effort": "none"}` 也认。
+  - 思考额度用完（`biz_code=15`）时网关会**同号关闭思考重试一次**（账号本身健康，不该被换掉）；仍失败才返回错误。
+  - 开搜索后流里会混入搜索状态帧（裸字符串，出现在首个 `response` 快照之前），解析器已按「见过 response 快照」过滤，不会混进正文。
+- **不支持 Function Calling**：网页版无 tools 透传，请求体里的 `tools` 会被忽略。
+
+**会话状态与上下文策略**：
+- 请求体带会话键（`metadata.conversation_id` / `conversation_id` 等，与粘性路由同一口径）→ 网关持久化「会话键 → `{账号, chat_session_id, parent_message_id}`」，prompt 只发本轮问题，历史由上游会话树带。
+- 无会话键 → 每次新建会话，prompt 拼全部历史（`用户: … / 助手: …`），即「每轮重新导入前文」。
+- 换账号 / 超过 `deepseek.session_ttl` / 上游 `biz_code=1` 或 `26` → 自动丢弃坐标、重建会话并重试一次（对客户端透明）。
+- 配置：`"deepseek": {"session_ttl": "24h", "session_file": "./data/deepseek_sessions.json"}`。`session_ttl` 必须**显著小于上游 3 天**。
+
+**续期**：DeepSeek **没有 refresh 接口**（前端收到 40003 直接跳登录页，token 是不透明 48 字节 blob，`users/current` 原样回显、不轮换）。因此 `RefreshToken` 实现为**存活校验**：`GET /api/v0/users/current` 返回 40003/40012 即判 `session_dead` 并禁用该号。失效后重新 `./login deepseek <昵称>` 覆盖即可；`expiresAt` 按 30 天估算，到期前网关会 WARN 提醒。
+
+**已知限制与坑**（详见 §8.4）：
+
+- 上游业务错误恒 `HTTP 200`，`code`/`biz_code` 在 body 里；网关 `Classify` 先判信封再判状态码。
+- `dsParseEnvelope` 必须把业务错误改写成 `>=400` 的 `Status`，否则调用方 `if status >= 400` 会漏判成成功。
+- PoW 申请失败也可能是 `40003`（token 失效），必须保留错误分类，不能当传输层错误直接换号。
+- SSE 有两种正文增量帧（带 `p` 的与裸帧 `{"v":"..."}`），且首帧快照是**前缀**不是全文。
+- wasm 编译走 `sync.Once`、实例池化复用；单实例累计分配超 1MB 回收重建（bump allocator 只增不减）。
+
+---
+## 3. 路由与选号
+
+- `withAuth` 中，`account_keys` 命中的密钥通过反向索引 `AccountKeyToUID` 把该账号 UID 下传 context。
+- 命中账号密钥的请求走 `PickByUIDIn`，**只使用该 UID 对应的那一个账号**（不经过 region/provider 过滤、不参与轮换，协议由该账号自身 `provider` 决定）。
+- 选中账号后，`h.cfg.Upstream.ProviderFor(acct)` 按账号自身 `provider` 取得实现：
+  - `Name` / `ChatStream` / `RefreshToken` / `FetchModels` / `StaticModels` / `Classify` / `StreamTo` / `Aggregate`。
+
+---
+
+## 4. 调度器（scheduler / travel）隔离
+
+
+---
+
+## 5. 构建与联调
+
+构建/启动见 [README 快速开始](README.md#快速开始)，添加账号一律在管理台完成。
+
+- `auths/auth.json`、`data/`、`config.json` 都是挂载卷：新增/修改凭证**无需重启**——网关每 5s 轮询 `auths/`；管理台「+ 添加账号」还会立即同步入池。零账号也能启动。
+
+### 验证某供应商可用
+
+每个供应商用**该账号的专属密钥**（`account_keys`）访问：
+
+```sh
+# 用 trae_1 账号密钥调 /status（只返回该账号）
+curl -s http://127.0.0.1:7863/status \
+  -H "Authorization: Bearer <trae_1 账号密钥>"
+
+# 用 qoder_1 账号密钥发起对话
+curl -s http://127.0.0.1:7863/v1/chat/completions \
+  -H "Authorization: Bearer <qoder_1 账号密钥>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qmodel_preview","stream":false,"messages":[{"role":"user","content":"hi"}]}'
+
+curl -N http://127.0.0.1:7863/v1/chat/completions \
+  -H "Content-Type: application/json" \
+```
+
+### 排错
+
+| 现象 | 可能原因 | 处理 |
+| --- | --- | --- |
+| Qoder 502 / `INTERNAL_ERROR` | 走了 HTTP/2 | 确认用 `Client.QoderHTTP`（已禁用 HTTP/2）；不要给 Qoder 复用 `ChatHTTP` |
+| Qoder 401 → 反复 refresh 仍死 | dt-/drt- 失效（或误用了 PAT 换的 jt-） | 重新走设备流拿真 dt-/drt- 写回 auth.json 的 qoder_<n> 条目 |
+| Trae 400 / 模型找不到 | 模型名未带 `__dev` 或目录未拉到 | 先调一次 `/models` 触发 `FetchModels` 建立映射 |
+| Trae `ErrSessionDead` 频繁 | JWT 过期/无效（正常情况下看护会靠 source_id 会话自动铸新的） | 先看日志有无 `token-watch … renewed provider=trae`；若报“无 refreshToken/会话凭证可自救”，说明 `extra.sourceId` 缺失或会话已失效 → 到管理台重新添加该号并粘新的 `X-Cloudide-Session` |
+| 请求全部 401 | 未带有效 `account_keys` 密钥 | 到管理台「密钥」页取对应账号的专属密钥 |
+
+---
+
+## 6. 已知限制（本仓库实现）
+
+- **Qoder**：COSY 协议与 qoderwork2api 对齐移植；对话网关只认设备令牌 `dt-`（`drt-` 刷新）。PAT→jobToken 兑换出的 `jt-` **仅对 OpenAPI 有效、不能用于对话网关**（实测返回 `105 Login expired`），请勿把 `jt-` 当 `dt-` 填。
+- **Trae**：refresh 协议为最佳努力实现，未经实机验证；失败即禁用账号，需手动刷新 JWT。
+  - 网页版逆向通道，**无 Function Calling / Tool Use**，不能作为编码智能体后端（`tools` 被忽略、`role:"tool"` 被丢弃）。
+  - 鉴权只有 `sessionid` Cookie，无刷新机制；失效即禁用账号，需人工重新抓取。
+  - 单账号无官方并发/频率保证，风控触发返回 429 或 `710022002`；多账号靠各自的 `account_keys` 密钥分流到不同号。
+  - 模型能力与网页版订阅档位一致（免费号可能只给 Lite 档）；`/v1/models` 为静态表，且**当前 model 名不影响实际回复**（固定 bot_id），直接指定任意模型名结果相同。
+- **通用**：全部改动已通过 `docker compose build` 实编译（见 §7）；上游协议层仍需真实凭证联调。
+
+---
+
+## 7. 已验证情况
+
+编译与账号池 / 鉴权链路已在本机 Docker 实测通过（`/healthz`、`/status`、`/v1/models`、账号密钥锁号）。
+各供应商的真实对话链路需自备凭证联调；协议差异见 §6 与 §8.4。
+
+---
+
+## 8. 接入新 Provider 代码规范（给什么 / 获取什么 / 踩坑点）
+
+新增一个上游供应商（如再来个 `xxx`），按下面清单落地。核心是实现 `internal/upstream/provider.go` 的 `Provider` 接口并注册。
+
+### 8.1 给什么（实现 `Provider` 接口的 8 个方法）
+| 方法 | 职责 | 关键点 |
+| --- | --- | --- |
+| `Name()` | provider 标识 | 必须与 `auth.json` 条目 `provider` 字段、`config.go` `knownProviders` 三处一致 |
+| `ChatStream(c, a, body)` | 发起对话，返回**上游原生流** | 返回 `(rc, status, respBody, err)`；非 2xx 时 `rc=nil`、`respBody` 带上游体供 `Classify` |
+| `RefreshToken(c, a)` | 刷新凭证 | 原地改 `a.AccessToken/RefreshToken/ExpiresAt`；无刷新能力就返回 error（会禁用账号） |
+| `FetchModels(c, a)` | 动态拉模型 | 返回 `[]ModelInfo`，**同时把「客户端名→上游 key」写进 `p.modelMap`** |
+| `StaticModels()` | 拉取失败回退表 | 返回该 provider 自己的干净模型名（别复用 codebuddy 表） |
+| `Classify(status, body)` | 错误分类 | 决定冷却/禁用：`ErrSessionDead` 会禁号、`ErrSoftRate`/`ErrHardCredit` 触发冷却 |
+| `StreamTo(w, rc, model)` | 原生 SSE → OpenAI SSE | 流式；把上游增量翻译成 `chat.completion.chunk` |
+| `Aggregate(rc, model)` | 原生 SSE → 单响应 | 非流式；聚合成一个 `chat.completion` |
+
+### 8.2 还要改的接线点
+1. **注册**（`internal/upstream/provider.go` `registerProviders`）：`c.providers["xxx"] = &xxxProvider{c: c}`。
+   ⚠️ **持有 `modelMap` 等跨调用状态的 provider 必须存指针 `&`、方法用指针接收者**（见 §8.4 坑①）。
+2. **凭证解析**（`internal/auth/auth.go` `Parse`）：识别新 provider 的凭证字段（`uid`/`nickname`/`accessToken`/`refreshToken`/`expiresAt`/`extra`）。
+3. **白名单**（`cmd/server/config.go` `knownProviders`）：加上新 provider 名。
+4. **建号入口**（`cmd/server/admin_accounts.go` + `internal/provision`）：管理台「+ 添加账号」按 provider 分派到粘贴型或设备流；换 token / 归一 / 落盘的实现只在 `internal/provision` 一份。
+5. **密钥**：管理台建号时自动生成嵌套 `account_keys`（已存在则沿用），无需手工跑脚本。
+6. **文档**：在本文件 §2 加凭证小节。
+
+### 8.3 获取什么（凭证来源速查，含最少 JSON）
+- **codebuddy**：管理台「+ 添加账号 → CodeBuddy」生成授权链接，浏览器登录后自动收号（国内 / 国际分开选）。
+- **trae**：粘 `{"sourceId":"<X-Cloudide-Session>"}`（网关拿它铸 JWT，`exp`/`data.id`/`source_id` 全自动）；也可直接粘 `{"accessToken":"<Cloud-IDE-JWT>"}`。
+- **deepseek**：粘 `{"accessToken":"mb5+…"}`（即 localStorage `userToken.value`；上游无 refresh，失效只能重粘）。
+
+### 8.4 踩坑点（本仓库真实教训，务必避开）
+1. **值接收者 + `modelMap` = 映射永久失效**：provider 以值存进 `providers` map，若 `FetchModels` 用值接收者，`p.modelMap=mm` 写在副本上被丢弃 → `resolveModel` 永远拿到空 map → 把客户端模型名**原样当上游 key 发出**（例：`qwen3.8-flash` 真实 key 是 `qfmodel`，发错名上游会走默认模型）。→ **有共享状态就指针接收者 + 存指针**。
+2. **`monitorBody` 传 `cancel=nil` 会 panic**：`ChatStream` 成功返回流后 handler 会 `Close` 响应体；`idle.go` 的 `Close` 若无条件调 `b.cancel()` 而 cancel 为 nil → 空指针 panic → 连接被重置，客户端只看到 `Connection error`（curl `http=000`）。→ 要么给流挂真实 cancel，要么 `monitorBody` 对 `cancel==nil` 直接返回原底流（已这么修）。
+3. **响应的 `model` 字段不可信**：上游常回 `auto`，网关用客户端请求名**覆盖回显**。判断真实模型只能看 `resolveModel` 出的 `upstreamKey`（`ChatStream` 已打 `client=... -> upstreamKey=...` 日志）。
+4. **`resolveModel` 依赖 `modelMap` 已预热**：冷启动/拉取失败时映射为空、名字不翻译。上线后先调一次 `/v1/models` 触发 `FetchModels`，并用 `StaticModels` 兜底。
+5. **`Classify` 决定账号生死**：401/403 归 `ErrSessionDead` 会直接禁号；凭证临期（如 JWT `exp`）必须正确写 `expiresAt`，否则每次对话都触发刷新、无 refreshToken 时直接拒（trae 就是典型）。
+6. **provider 字段与账号标签解耦**：`auth.json` 顶层键只是给人看的标签，真正路由看条目内 `provider`/`uid`；改标签不影响选号。
+7. **回退别串号**：`handler.go` `modelList` 拉取失败时按**绑定账号自身 provider** 回退其 `StaticModels`，不要无脑回落 codebuddy 表（已修）。
+9. **上游鉴权失败可能藏在 HTTP 200 的 SSE 里（qoder 105）**：错误帧形如 `{"body":"{\"code\":\"105\"}","statusCodeValue":403}`，`code` 在 body 内部。只判顶层 `code` 会把错误帧当正常 chunk 透传，客户端永远等不到 `[DONE]`（流式挂死、非流式 180s 超时）。→ 解析器必须同时判顶层与 body 内嵌错误，并用 `choices` 字段区分正常帧。
+10. **`bufio.Peek(n)` 会阻塞到读满 n 字节**：用它探活上游首帧时，短帧（约 150 字节）+ 上游不关连接 = 直接挂死。→ 用 `ReadString` 读首行，再把该行拼回流头交给下游。
+11. **`expiresAt` 写 `farFuture` 等于关闭自动续期**：`NeedsRefresh` 永远为 false，token watch 从不触发，凭证一过期该号就永久失效且无日志。→ 对不透明凭证写**估算**寿命（如 dt- 按 30 天），宁可多刷几次。
+12. **DeepSeek 的 SSE 有两种正文增量帧**：带路径的 `{"p":"response/fragments/-1/content","o":"APPEND","v":"..."}` 和**裸帧** `{"v":" How"}`（无 `p`）。只认前者会静默丢掉裸帧的全部内容——表现是「回答被截断成快照前缀」，而且短回答恰好看不出来（首帧快照就够）。→ 两种都要处理，且快照是**前缀**不是全文（快照 `864` + APPEND `2` = `8642`），既不能丢也不能重复。
+13. **上游错误恒 HTTP 200 时，`Classify` 必须先判信封再判状态码**：网关为了让 handler 走错误分支，会把 200 改写成 502；若 `Classify` 先看 `status>=500`，就会把 `biz_code=1`（会话失效，应重建）误判成 `ErrServer`（上游故障，应换号），重试逻辑永远不触发。
